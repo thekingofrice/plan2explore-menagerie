@@ -55,8 +55,11 @@ run budgets should not assume an empty card.
 
 ## Environment pins that are load-bearing
 
-These are not implied by any upstream package's metadata. Without them a fresh venv fails, so they
-are pinned in `requirements-lock.txt` and explained here.
+These are not implied by any upstream package's metadata. Without them a fresh venv fails.
+
+`requirements-lock.txt` must be generated with **`pip freeze --all`**. Plain `pip freeze` omits
+`setuptools`, `pip` and `wheel`, which would silently drop the `setuptools<81` pin below and hand the
+next person the same `pkg_resources` failure the lock file exists to prevent.
 
 | Pin | Why |
 |---|---|
