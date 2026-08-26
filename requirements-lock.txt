@@ -1,0 +1,23 @@
+# requirements-lock.txt
+#
+# Implements: References/SelfEx-WM_Notes.tex §5 Repository Layout, §6 Phase 0: Freeze the Software.
+# Required by §19 Definition of Success: pinning the two upstream git SHAs does not pin PyPI, so
+# without this file torch/gymnasium/mujoco still float and a clone is not reproducible.
+#
+# NOT hand-written. This file is the exact `pip freeze` of the Python 3.11 virtualenv, captured by
+# scripts/phase1_install.sh after `pip install -e ".[mujoco,dev,test]"` succeeds.
+#
+# Regenerate:
+#     bash scripts/phase1_install.sh          # installs, then rewrites this file
+#     # or, against an already-built venv:
+#     .venv311/bin/python -m pip freeze > requirements-lock.txt
+#
+# Reinstall from this lock on another machine:
+#     python3.11 -m venv .venv311
+#     .venv311/bin/python -m pip install -r requirements-lock.txt
+#     .venv311/bin/python -m pip install -e "./sheeprl[mujoco,dev,test]" --no-deps
+#
+# The `-e ./sheeprl` line that pip freeze emits points at the pinned clone from
+# scripts/phase0_freeze.sh; the SHA that makes it reproducible is in UPSTREAM.md, not here.
+
+# <pending — run scripts/phase1_install.sh>

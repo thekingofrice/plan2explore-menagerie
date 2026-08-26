@@ -1,0 +1,37 @@
+# --- Pinned upstream checkouts (SHAs recorded in UPSTREAM.md, cloned by scripts/phase0_freeze.sh) ---
+/sheeprl/
+/third_party/mujoco_menagerie/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.venv*/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- Run artifacts: large, must live outside Git (notes 5) ---
+logs/
+outputs/
+multirun/
+/results/runs/
+*.ckpt
+*.pt
+*.pth
+events.out.tfevents.*
+*.mp4
+*.avi
+*.npz
+*.memmap
+
+# --- Kept in Git: the small machine-readable outputs ---
+!/results/manifests/
+!/results/summaries/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

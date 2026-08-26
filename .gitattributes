@@ -1,0 +1,8 @@
+# Authored on Windows, executed on a Linux cluster. Force LF so bash never sees CRLF.
+*.sh text eol=lf
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.xml text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
