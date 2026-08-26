@@ -18,10 +18,10 @@ UPSTREAM_MD="${REPO_ROOT}/UPSTREAM.md"
 SHEEPRL_URL="https://github.com/Eclectic-Sheep/sheeprl.git"
 MENAGERIE_URL="https://github.com/google-deepmind/mujoco_menagerie.git"
 
-# Leave empty on the very first clone; scripts/record_upstream.sh writes the observed SHAs into
-# UPSTREAM.md, and they are pasted back here to hard-pin every subsequent checkout.
-SHEEPRL_PIN="${SHEEPRL_PIN:-}"
-MENAGERIE_PIN="${MENAGERIE_PIN:-}"
+# Pinned 2026-08-25 (notes §6: "Do not rely on a floating main branch once experiments begin").
+# These must stay identical to the SHAs recorded in UPSTREAM.md; check_pins() enforces that.
+SHEEPRL_PIN="${SHEEPRL_PIN:-33b636681fd8b5340b284f2528db8821ab8dcd0b}"
+MENAGERIE_PIN="${MENAGERIE_PIN:-da76818e269b82289eba39808e2fb91d679d6994}"
 
 # --- Python (notes 7) -------------------------------------------------------
 # SheepRL declares requires-python = ">=3.8,<3.12", so the venv is built with 3.11.
@@ -52,6 +52,24 @@ require_clones() {
     || die "SheepRL not cloned -- see README 'Phase 0' (notes §6)"
   [[ -d "${MENAGERIE_DIR}/.git" ]] \
     || die "MuJoCo Menagerie not cloned -- see README 'Phase 0' (notes §6)"
+}
+
+# A checkout that has drifted off its pin silently invalidates both the purity diff (notes §3) and
+# the sheeprl_commit/menagerie_commit fields of every manifest (notes §17). Fail loudly instead.
+check_pins() {
+  require_clones
+  local name dir pin head
+  for spec in "SheepRL:${SHEEPRL_DIR}:${SHEEPRL_PIN}" \
+              "Menagerie:${MENAGERIE_DIR}:${MENAGERIE_PIN}"; do
+    IFS=':' read -r name dir pin <<<"${spec}"
+    head="$(git -C "${dir}" rev-parse HEAD)"
+    [[ "${head}" == "${pin}" ]] || die \
+      "${name} HEAD drifted off its pin.
+    pinned : ${pin}   (scripts/common.sh, UPSTREAM.md)
+    actual : ${head}   (${dir})
+  Restore with:  git -C ${dir} checkout ${pin}
+  Or, if the new commit is intended, update BOTH common.sh and UPSTREAM.md and re-run Phase 1."
+  done
 }
 
 # Run the pinned interpreter. Used instead of `source .../activate` so the scripts stay safe
