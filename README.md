@@ -67,7 +67,6 @@ Every file in this repository implements a specific section of
 | `scripts/phase1_install.sh` | §7 Phase 1: Install and Validate SheepRL Before Menagerie |
 | `scripts/smoke_upstream.sh` | §7 Phase 1 (upstream smoke test); §12.1 Gate A |
 | `ENVIRONMENT_SPEC.md` | §8 Phase 2: First Menagerie Task — Panda Reach (§8.1–§8.4) |
-| `menagerie_tasks/panda_reach.xml` | §8 Phase 2 (robot model + task scene) |
 | `menagerie_integration/menagerie_panda.py` | §8.1–§8.4 task/obs/action/control; §9 Phase 3 Gymnasium env |
 | `menagerie_integration/menagerie_panda_reach.yaml` | §11.1 Phase 5 Option A |
 | `scripts/install_env_wrapper.sh` | §11.1 Phase 5 Option A |
@@ -91,7 +90,7 @@ Every file in this repository implements a specific section of
 | `scripts/metrics/world_model_metrics.py` | §13.3 World-model metrics |
 | `scripts/random_baseline.py` | §14 Phase 8: Random Baseline |
 | `scripts/write_manifest.py` | §17 Reproducibility Manifest |
-| `menagerie_tasks/panda_push.xml` *(later)* | §15 Phase 9: Second Task — Panda Push |
+| `menagerie_tasks/` *(deferred)* | §8 / §15 task MJCF — see ENVIRONMENT_SPEC.md "Why no task MJCF" |
 
 ## Quickstart (Linux + CUDA)
 
