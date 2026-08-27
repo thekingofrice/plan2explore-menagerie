@@ -98,6 +98,94 @@ This cost is specific to pixel observations. Panda Reach is a **vector**-observa
 with no CNN keys and no rendering in the step path, so it should be substantially faster and may not
 need `sync_env=True` at all.
 
+## Phase 5 outcome (§11)
+
+`env=menagerie_panda_reach` resolves, `_target_` imports, and Plan2Explore trains on the Panda with no
+crash. Confirmed 2026-08-26. Two sets of overrides were required; both are configuration, so
+`sheeprl/algos/` remains untouched and §3's deviation log does not apply.
+
+### Observation keys
+
+The stock `exp=p2e_dv3_exploration` declares `cnn_keys.encoder=[rgb]` and `cnn_keys.decoder=[rgb]`,
+which are defaults for pixel tasks. Panda Reach emits a single `"state"` key (§8.2), so SheepRL
+raised `ValueError: The user specified keys ['rgb'] are not a subset of the environment ... keys`.
+Required:
+
+    algo.cnn_keys.encoder=[]  algo.cnn_keys.decoder=[]
+    algo.mlp_keys.encoder=[state]  algo.mlp_keys.decoder=[state]
+
+Adding an `rgb` observation instead — to "adapt the environment to the baseline" per §3 — was
+considered and rejected: §8.2 specifies a vector-observation experiment and §17's manifest field is
+`observation_mode: vector`, so it would contradict the section being implemented. It would also
+reintroduce per-step EGL rendering, the suspected cause of the Phase 1 slowness above. A pixel
+version of Panda Reach is a legitimate later experiment with its own manifest, not a way around a
+config override.
+
+### Model size: DreamerV3-S, not XL
+
+SheepRL's default is DreamerV3-**XL** (`recurrent_state_size 4096`, `dense_units 1024`,
+`mlp_layers 5`), sized for 64x64 pixel observations. Panda Reach's observation is a 24-dimensional
+vector, and Hafner's own paper uses the S/M configurations for proprioceptive control. Reduced to S:
+
+    algo.dense_units=512  algo.mlp_layers=2
+    algo.world_model.recurrent_model.recurrent_state_size=512
+    algo.world_model.transition_model.hidden_size=512
+    algo.world_model.representation_model.hidden_size=512
+
+`dense_units` and `mlp_layers` propagate by interpolation to the encoder, decoder, reward model,
+discount model, actor, critic and ensembles.
+
+`algo.ensembles.n` stays at **8**. Disagreement across those members *is* Plan2Explore's intrinsic
+reward, so shrinking it would change the exploration signal rather than the compute cost.
+`per_rank_batch_size` (16) and `per_rank_sequence_length` (64) stay at their defaults, so the
+training recipe is stock and only the network size differs.
+
+Per §4.1 the result is reported as **Plan2Explore (DreamerV3-S, SheepRL)**.
+
+### GPU contention
+
+The RTX 4090 is shared and persistently carries ~11.6 GB of other users' processes, leaving ~12 GB.
+XL needed 12.11 GB and OOM'd in the imagination rollout even with `per_rank_batch_size=8` — that
+memory is dominated by `batch x seq_len x horizon` latent states, which the batch size alone cannot
+fix. S was adopted for correctness of task sizing, not only to fit.
+
+## Measured throughput (§12 sizing)
+
+2400 policy steps in ~12 minutes, seed 0, DreamerV3-S, `num_envs: 4`. That average splits in two:
+the first ~1024 steps are pure collection at roughly 30 steps/s (GPU idle, `learning_starts: 1024`),
+and the remainder run at **≈ 2 steps/s** once `replay_ratio: 1` starts a gradient update per
+environment step.
+
+Sequential wall-clock at 2 steps/s:
+
+| Gate | Steps | Time |
+|---|---|---|
+| §12.2 B — 3 seeds x 10^5 | 3x10^5 | ~42 h |
+| §12.3 C — 5 seeds x 5x10^5 | 2.5x10^6 | ~14 days |
+| §12.3 C — 5 seeds x 10^6 | 5x10^6 | ~29 days |
+
+Gate C as specified is not feasible sequentially. Seeds are independent experiments, so running them
+concurrently is free scientifically and is the first lever to try — DreamerV3-S is small enough that
+several should fit in the ~12 GB left by other users. `algo.replay_ratio` is the only other large
+lever, and it changes how much the world model learns per unit of experience, so it would have to be
+frozen and recorded like `alpha` and the model size.
+
+`algo.total_steps` defaults to **5,000,000** — far beyond even §12.3's 10^6 — so every gate must set
+it explicitly.
+
+## Gate A (§12.1): abbreviated by decision
+
+Run as a confirmation that the pipeline executes end to end, not as an evaluation of §12.1's pass
+criteria. Agreed between Minh and their advisor, 2026-08-26.
+
+Confirmed: the run starts, trains, and completes without NaNs or simulator instability; GPU use is
+confirmed; TensorBoard scalars are written; `Rewards/intrinsic` and the loss curves were inspected
+visually and look healthy.
+
+Not done: any quantitative check of §12.1's criteria — intrinsic-reward variance, ensemble-loss
+descent and actor/critic finiteness were judged by eye rather than measured. §13's metrics are the
+instrument for that, and Gate B is the first run they will be applied to.
+
 <!-- END RECORDED -->
 
 ---

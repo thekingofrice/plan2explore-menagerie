@@ -1,25 +1,26 @@
 """Menagerie Panda Reach - a standalone Gymnasium environment.
 
 Implements: References/SelfEx-WM_Notes.tex
-    §8  Phase 2: First Menagerie Task - Panda Reach   (§8.1 task, §8.2 observation,
-                                                       §8.3 action, §8.4 control interval)
-    §9  Phase 3: Implement a Gymnasium-Compatible Environment
+    §8    Phase 2: First Menagerie Task - Panda Reach (§8.1 task, §8.2 observation, §8.3 action,
+          §8.4 control interval)
+    §9    Phase 3: Implement a Gymnasium-Compatible Environment
     §11.1 Phase 5 Option A - installed to sheeprl/sheeprl/envs/menagerie_panda.py
+    §13   trajectory logging, so coverage and task metrics survive a run
 
-Canonical copy lives in menagerie_integration/ because the SheepRL checkout is a pinned clone and is
-gitignored. scripts/install_env_wrapper.sh links it into the checkout, so at runtime the Option A
-layout holds and `_target_` resolves to sheeprl.envs.menagerie_panda.MenageriePandaReach.
+Canonical copy lives in menagerie_integration/ because the SheepRL checkout is a gitignored pinned
+clone; scripts/install_env_wrapper.sh symlinks it into place.
 
-Every frozen constant here has its source of truth in ENVIRONMENT_SPEC.md. They arrive as
-constructor arguments from sheeprl/configs/env/menagerie_panda_reach.yaml; the defaults below match
-the spec so the class is usable standalone in tests.
+Every frozen constant has its source of truth in ENVIRONMENT_SPEC.md and arrives as a constructor
+argument from sheeprl/configs/env/menagerie_panda_reach.yaml. The defaults below match the spec so
+the class is usable standalone in tests.
 
-This file must never import from sheeprl. It is a plain Gymnasium environment, which is what keeps
-§3's algorithm-purity rule intact: the environment adapts to the baseline, not the reverse.
+Never imports from sheeprl. That is what keeps §3 intact: the environment adapts to the baseline,
+not the reverse.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -28,35 +29,31 @@ import mujoco
 import numpy as np
 from gymnasium import spaces
 
-# --- §8 frozen constants (see ENVIRONMENT_SPEC.md) --------------------------
+# --- §8 frozen constants (source of truth: ENVIRONMENT_SPEC.md) -------------
 
-#: Repository root, resolved from this file's own location rather than the working directory.
-#: Path.resolve() follows the §11.1 Option A symlink from sheeprl/sheeprl/envs/menagerie_panda.py
-#: back to menagerie_integration/menagerie_panda.py, whose parent is the repo root. This matters
-#: because SheepRL is launched from the sheeprl/ directory, so a path relative to the caller's cwd
-#: would not resolve.
+#: Resolved from this file's location, not the working directory: Path.resolve() follows the §11.1
+#: symlink back here, and SheepRL is launched from sheeprl/ where a cwd-relative path would not work.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-#: Loaded unmodified from the pinned Menagerie checkout. Menagerie's own scene.xml is used directly
-#: rather than a task MJCF of ours -- see ENVIRONMENT_SPEC.md "Why no task MJCF".
+#: Menagerie's own scene.xml, unmodified -- see ENVIRONMENT_SPEC.md "Why no task MJCF".
 DEFAULT_XML = str(
     REPO_ROOT / "third_party" / "mujoco_menagerie" / "franka_emika_panda" / "scene.xml"
 )
 
-DEFAULT_CONTROL_DT = 0.05           # §8.4
-DEFAULT_MAX_EPISODE_STEPS = 100     # 5.0 s at 0.05 s/step
-DEFAULT_ALPHA = 10.0                # §8.1, frozen before training
-DEFAULT_SUCCESS_TOL = 0.05          # §8.1, 5 cm
+DEFAULT_CONTROL_DT = 0.05
+DEFAULT_MAX_EPISODE_STEPS = 100
+DEFAULT_ALPHA = 10.0
+DEFAULT_SUCCESS_TOL = 0.05
 DEFAULT_TARGET_BOX_LOW = (0.30, -0.30, 0.20)
 DEFAULT_TARGET_BOX_HIGH = (0.60, 0.30, 0.60)
-DEFAULT_JOINT_JITTER = 0.05         # rad, uniform, on the 7 arm joints
+DEFAULT_JOINT_JITTER = 0.05
 
-#: §8.1 p_ee. Menagerie's Panda declares no sites, so the end effector is derived from the `hand`
-#: body's pose. 0.1034 m is the Franka TCP offset along the hand frame's +z, between the fingers.
+#: Menagerie's Panda declares no sites, so p_ee is derived from the hand body's pose. 0.1034 m is the
+#: Franka TCP offset along the hand frame's +z, between the fingers.
 EE_BODY = "hand"
 EE_OFFSET = np.array([0.0, 0.0, 0.1034], dtype=np.float64)
 
-N_ARM_JOINTS = 7                    # qpos[:7]; qpos[7:9] are the two fingers
+N_ARM_JOINTS = 7  # qpos[:7]; qpos[7:9] are the fingers
 
 
 class MenageriePandaReach(gym.Env):
@@ -65,6 +62,9 @@ class MenageriePandaReach(gym.Env):
     Observation is a single flat vector under the key ``"state"`` (§8.2). Actions are normalized to
     ``[-1, 1]`` and mapped onto the model's native actuator ranges (§8.3). One ``step`` advances the
     simulation by ``control_dt`` seconds via an integer number of physics substeps (§8.4).
+
+    Set ``trajectory_log`` to a directory to record end-effector positions and per-episode outcomes
+    for §13's metrics.
     """
 
     metadata = {
@@ -85,21 +85,25 @@ class MenageriePandaReach(gym.Env):
         joint_jitter: float = DEFAULT_JOINT_JITTER,
         render_height: int = 480,
         render_width: int = 640,
+        trajectory_log: str | None = None,
         seed: int | None = None,
     ) -> None:
+        """Build the model and derive every space and constant from it.
+
+        Raises if the control interval is not an integer number of physics substeps (§8.4) or if any
+        actuator is unlimited (§8.3) -- either would make the advertised contract untrue rather than
+        merely approximate.
+        """
         super().__init__()
 
         if render_mode is not None and render_mode not in self.metadata["render_modes"]:
             raise ValueError(f"unsupported render_mode {render_mode!r}")
         self.render_mode = render_mode
 
-        # --- Model -----------------------------------------------------------
         self.model = mujoco.MjModel.from_xml_path(xml_path)
         self.data = mujoco.MjData(self.model)
 
-        # --- §8.4 Control interval ------------------------------------------
-        # The substep count must be exact. A non-integral value would mean the advertised control
-        # rate is a lie, which would silently corrupt every trajectory in the replay buffer.
+        # §8.4 control interval
         self.control_dt = float(control_dt)
         self.sim_dt = float(self.model.opt.timestep)
         substeps = self.control_dt / self.sim_dt
@@ -110,9 +114,8 @@ class MenageriePandaReach(gym.Env):
             )
         self.n_substeps = int(round(substeps))
 
-        # --- §8.3 Action space ----------------------------------------------
-        # Bounds are read from the model, never hard-coded, so a Menagerie version bump cannot
-        # silently change what a normalized action means.
+        # §8.3 action space. Bounds come from the model so a Menagerie bump cannot silently change
+        # what a normalized action means.
         self._ctrl_low = self.model.actuator_ctrlrange[:, 0].copy()
         self._ctrl_high = self.model.actuator_ctrlrange[:, 1].copy()
         if not np.all(self.model.actuator_ctrllimited):
@@ -124,7 +127,7 @@ class MenageriePandaReach(gym.Env):
             low=-1.0, high=1.0, shape=(self.model.nu,), dtype=np.float32
         )
 
-        # --- §8.2 Observation space ------------------------------------------
+        # §8.2 observation space
         obs_dim = self.model.nq + self.model.nv + 3 + 3  # q, qdot, p_ee, g
         self.observation_space = spaces.Dict(
             {
@@ -134,7 +137,7 @@ class MenageriePandaReach(gym.Env):
             }
         )
 
-        # --- §8.1 Task parameters --------------------------------------------
+        # §8.1 task parameters
         self.alpha = float(alpha)
         self.success_tol = float(success_tol)
         self.target_box_low = np.asarray(target_box_low, dtype=np.float64)
@@ -142,25 +145,73 @@ class MenageriePandaReach(gym.Env):
         self.joint_jitter = float(joint_jitter)
         self.max_episode_steps = int(max_episode_steps)
 
-        # --- Cached ids -------------------------------------------------------
         self._ee_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, EE_BODY)
         if self._ee_body_id < 0:
             raise ValueError(f"model has no body named {EE_BODY!r}")
         self._home_key_id = 0 if self.model.nkey > 0 else -1
 
-        # --- Episode state ----------------------------------------------------
         self.steps = 0
         self.target = np.zeros(3, dtype=np.float64)
+        self._episode_return = 0.0
+        self._total_steps = 0
 
-        # --- Rendering --------------------------------------------------------
-        # Constructed lazily: building a Renderer requires a GL context, and the environment must be
-        # importable and steppable on machines that have none.
+        self._traj_dir = Path(trajectory_log) if trajectory_log else None
+        self._ee_file = None
+        self._episode_file = None
+        if self._traj_dir is not None:
+            self._open_trajectory_files()
+
+        # Renderer is lazy: it needs a GL context, and the env must import and step without one.
         self.render_height = int(render_height)
         self.render_width = int(render_width)
         self._renderer: mujoco.Renderer | None = None
 
         if seed is not None:
             self.reset(seed=seed)
+
+    # ------------------------------------------------------------------- §13
+
+    def _open_trajectory_files(self) -> None:
+        """Open the two raw float32 append streams that §13's metrics are computed from.
+
+        SheepRL does not log info-dict contents, so end-effector positions and episode outcomes are
+        otherwise computed every step and discarded. §13.2's C_workspace needs the positions visited
+        *while exploring*, which cannot be reconstructed from a checkpoint afterwards.
+
+            ee_<pid>_<id>.f32        3 floats/step      x, y, z
+            episodes_<pid>_<id>.f32  4 floats/episode   total_steps, return, final_distance, success
+
+        Read back with np.fromfile(...).reshape(-1, 3) and (-1, 4). Raw streams rather than .npy
+        because both are appended to across a multi-hour run and must survive an abrupt kill: there
+        is no header to finalize. Filenames are per-instance because a vectorized run has several
+        environments live in separate processes.
+        """
+        self._traj_dir.mkdir(parents=True, exist_ok=True)
+        tag = f"{os.getpid()}_{id(self):x}"
+        self._ee_file = open(self._traj_dir / f"ee_{tag}.f32", "ab")
+        self._episode_file = open(self._traj_dir / f"episodes_{tag}.f32", "ab")
+
+    def _record_episode(self) -> None:
+        """Append the finished episode's outcome.
+
+        Called from reset rather than on truncation: SheepRL's vectorized wrapper auto-resets, so
+        this is the only point guaranteed to see every episode's final state. ``total_steps`` gives
+        the §13 curves an honest x-axis -- with several environments interleaving, an episode's
+        ordinal is not proportional to the step it ended at.
+        """
+        self._episode_file.write(
+            np.array(
+                [
+                    self._total_steps,
+                    self._episode_return,
+                    self._distance(),
+                    float(self._success()),
+                ],
+                dtype=np.float32,
+            ).tobytes()
+        )
+        self._episode_file.flush()
+        self._ee_file.flush()
 
     # ------------------------------------------------------------------ §8.3
 
@@ -169,8 +220,8 @@ class MenageriePandaReach(gym.Env):
 
             u = u_min + (a + 1) / 2 * (u_max - u_min)
 
-        Clipping first guarantees the result is inside ctrlrange for any finite input, which is what
-        the §10 "Action bounds" and "Joint safety" tests assert.
+        Clipping first puts the result inside ctrlrange for any finite input, which is what §10's
+        "Action bounds" row asserts.
         """
         a = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
         return self._ctrl_low + (a + 1.0) * 0.5 * (self._ctrl_high - self._ctrl_low)
@@ -178,7 +229,7 @@ class MenageriePandaReach(gym.Env):
     # ------------------------------------------------------------------ §8.1
 
     def _ee_position(self) -> np.ndarray:
-        """End-effector position p_ee, derived from the hand body's pose (§8.1)."""
+        """End-effector position p_ee, from the hand body's pose plus the TCP offset (§8.1)."""
         xpos = self.data.xpos[self._ee_body_id]
         xmat = self.data.xmat[self._ee_body_id].reshape(3, 3)
         return xpos + xmat @ EE_OFFSET
@@ -190,23 +241,20 @@ class MenageriePandaReach(gym.Env):
     def _sample_target(self) -> np.ndarray:
         """Sample g uniformly from the fixed reachable box (§8.1).
 
-        Uniform in the box, unweighted. The box is sized (ENVIRONMENT_SPEC.md) so that every corner
-        is comfortably inside the Panda's reach, which is what makes an unweighted uniform draw
-        safe -- there is no unreachable region to bias away from.
-
-        Draws from ``self.np_random`` only -- never np.random -- so that §10's reset-determinism and
-        seed-separation tests hold.
+        Unweighted: the box is sized so every corner is comfortably inside the Panda's reach, so
+        there is no unreachable region to bias away from. Draws from ``self.np_random`` only, never
+        np.random, which is what makes §10's reset-determinism and seed-separation rows hold.
         """
         return self.np_random.uniform(self.target_box_low, self.target_box_high)
 
     def _task_reward(self) -> float:
-        """Bounded dense reward r_task = exp(-alpha * d^2) (§8.1), with alpha frozen.
+        """Bounded dense reward r_task = exp(-alpha * d^2) (§8.1).
 
-        alpha = 10.0 is FROZEN, confirmed against the measured start-state distribution over 2000
-        seeds (ENVIRONMENT_SPEC.md): r(0.017)=0.997, r(0.27 median)=0.478, r(0.50)=0.082. The reward
-        spans its full range across the distances the task actually produces.
+        alpha = 10.0 is frozen, confirmed against the measured start-state distribution over 2000
+        seeds: r(0.017)=0.997, r(0.27 median)=0.478, r(0.50)=0.082, so the reward spans its full
+        range across the distances the task actually produces.
 
-        This reward exists ONLY so the task actor can be evaluated. The exploration actor optimizes
+        Exists only so the task actor can be evaluated. The exploration actor optimizes
         Plan2Explore's intrinsic objective and never sees it.
         """
         d = self._distance()
@@ -221,41 +269,30 @@ class MenageriePandaReach(gym.Env):
     def _get_obs(self) -> dict[str, np.ndarray]:
         """o_t = [q_t, qdot_t, p_ee,t, g] as a flat single-key dict (§8.2).
 
-        q_t is the full nq=9 joint vector: 7 arm joints plus both finger joints. The fingers are
-        included because §8.3 actuates the gripper -- if the policy can move a joint the world model
-        cannot see, its effect appears as irreducible noise, which is precisely the aleatoric
-        uncertainty Plan2Explore's ensemble must not confuse with epistemic uncertainty.
+        q_t is the full nq=9 vector, both finger joints included, because §8.3 actuates the gripper:
+        a joint the policy can move but the world model cannot see appears as irreducible noise --
+        the aleatoric uncertainty Plan2Explore's ensemble must not mistake for epistemic.
+        finger_joint2 mirrors finger_joint1 by equality constraint, so one dimension is exactly
+        redundant, which is harmless and keeps q_t equal to data.qpos with no index masking.
 
-        finger_joint2 is an equality-constrained mirror of finger_joint1, so one dimension is exactly
-        redundant. That is harmless -- a constant linear dependence the encoder learns to ignore --
-        and it keeps q_t literally equal to data.qpos with no index masking.
-
-        No normalization here -- SheepRL handles its own input scaling.
+        Unnormalized; SheepRL handles its own input scaling.
         """
         state = np.concatenate(
-            [
-                self.data.qpos,
-                self.data.qvel,
-                self._ee_position(),
-                self.target,
-            ]
+            [self.data.qpos, self.data.qvel, self._ee_position(), self.target]
         ).astype(np.float32)
         return {"state": state}
 
     def _reset_model(self) -> None:
-        """Reset to the home keyframe with small per-joint jitter (§8.1).
+        """Restore the home keyframe with per-joint jitter on the arm (§8.1).
 
-        The keyframe restores qpos, qvel and ctrl together, so the arm starts in a pose consistent
-        with the controls holding it -- with position actuators, resetting qpos alone while leaving
-        ctrl at zero would command a lurch toward joint position 0 on the first step.
+        The keyframe restores qpos, qvel *and* ctrl together. That matters with position actuators:
+        resetting qpos alone while leaving ctrl at zero would command every joint toward position 0
+        and lurch on the first step of every episode.
 
-        Jitter is applied to the 7 arm joints only, and clipped to the joint limits so a perturbed
-        start can never begin out of range. The fingers are left at the keyframe value: their
-        position is driven by the policy through actuator8 from the first step anyway, so jittering
-        them adds nothing.
-
-        Jitter exists so that different seeds give different initial states, not only different
-        targets (§10 "Seed separation").
+        Jitter is clipped to the joint limits so a perturbed start is never out of range, and is not
+        applied to the fingers, whose position the policy drives from the first step anyway. It
+        exists so different seeds give different initial states, not only different targets (§10
+        "Seed separation").
         """
         if self._home_key_id >= 0:
             mujoco.mj_resetDataKeyframe(self.model, self.data, self._home_key_id)
@@ -270,49 +307,59 @@ class MenageriePandaReach(gym.Env):
                 self.data.qpos[:N_ARM_JOINTS] + noise, lo, hi
             )
 
-        # Always start at rest, so the initial state is a pose rather than a pose plus momentum.
-        self.data.qvel[:] = 0.0
+        self.data.qvel[:] = 0.0  # start at rest: a pose, not a pose plus momentum
 
-    # ------------------------------------------------------------------ §9
+    # -------------------------------------------------------------------- §9
 
     def reset(
         self, *, seed: int | None = None, options: dict[str, Any] | None = None
     ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-        # Seeds self.np_random. Everything stochastic below must draw from it.
-        super().reset(seed=seed)
+        """Sample a new target and restore the start pose (§9).
+
+        Records the outgoing episode first, while its final state is still intact.
+        """
+        if self._episode_file is not None and self.steps > 0:
+            self._record_episode()
+
+        super().reset(seed=seed)  # seeds self.np_random; all sampling below draws from it
 
         mujoco.mj_resetData(self.model, self.data)
         self._reset_model()
         self.target = self._sample_target()
         self.steps = 0
+        self._episode_return = 0.0
 
-        # Populate derived quantities (xpos/xmat) before the first observation is read.
-        mujoco.mj_forward(self.model, self.data)
+        mujoco.mj_forward(self.model, self.data)  # populate xpos/xmat before the first observation
 
         return self._get_obs(), self._info()
 
     def step(
         self, action: np.ndarray
     ) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
+        """Advance one control interval: n_substeps physics steps under a held control (§8.4).
+
+        ``terminated`` is always False by design. Reaching is not absorbing, and an early-terminating
+        episode would leak task information into the exploration objective through DreamerV3's
+        continue-predictor.
+        """
         self.data.ctrl[:] = self._denormalize_action(action)
         for _ in range(self.n_substeps):
             mujoco.mj_step(self.model, self.data)
 
         self.steps += 1
+        self._total_steps += 1
 
         obs = self._get_obs()
         reward = self._task_reward()
+        self._episode_return += reward
 
-        # terminated is always False by design: reaching is not absorbing, and an early-terminating
-        # episode would leak task information into the exploration objective through DreamerV3's
-        # continue-predictor. See ENVIRONMENT_SPEC.md §6.
-        terminated = False
-        truncated = self.steps >= self.max_episode_steps
+        if self._ee_file is not None:
+            self._ee_file.write(self._ee_position().astype(np.float32).tobytes())
 
-        return obs, reward, terminated, truncated, self._info()
+        return obs, reward, False, self.steps >= self.max_episode_steps, self._info()
 
     def _info(self) -> dict[str, Any]:
-        """Per-step diagnostics consumed by the §13 metrics."""
+        """Per-step diagnostics consumed by §13's metrics."""
         ctrl = self.data.ctrl
         at_limit = np.isclose(ctrl, self._ctrl_low) | np.isclose(ctrl, self._ctrl_high)
         return {
@@ -337,3 +384,9 @@ class MenageriePandaReach(gym.Env):
         if self._renderer is not None:
             self._renderer.close()
             self._renderer = None
+        for attr in ("_ee_file", "_episode_file"):
+            handle = getattr(self, attr, None)
+            if handle is not None:
+                handle.flush()
+                handle.close()
+                setattr(self, attr, None)

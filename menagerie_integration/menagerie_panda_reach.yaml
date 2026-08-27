@@ -49,3 +49,12 @@ wrapper:
   render_mode: null
   render_height: 480
   render_width: 640
+
+  # §13 trajectory logging. SheepRL does not log info-dict contents, so ee_position, episode return
+  # and success would otherwise be computed every step and discarded. §13.2's C_workspace needs the
+  # positions visited *while exploring*, which cannot be reconstructed from a checkpoint afterwards.
+  #
+  # null disables it. Set to a directory to record; scripts/metrics.py reads it back. Override per
+  # run so seeds do not mix:
+  #     env.wrapper.trajectory_log=<repo>/results/runs/gateB_seed0/trajectories
+  trajectory_log: null
