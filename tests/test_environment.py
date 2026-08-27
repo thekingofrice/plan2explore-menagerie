@@ -145,22 +145,55 @@ def test_finite_state(env):
 
 # ------------------------------------------------------------- Joint safety
 
+#: MuJoCo enforces joint limits as soft constraints with finite stiffness, so a joint driven into its
+#: stop penetrates slightly. Measured over 1000 random-action steps:
+#:
+#:   joint2       hinge, rad    0.0299 rad of a 3.53 rad range -- shoulder pitch, carries the whole
+#:                              arm; commanded in-limit, momentum overshoots
+#:   finger_1/2   SLIDE, m      0.0066 m of a 0.04 m range -- actuator8's [0,255] tendon control has
+#:                              no unit correspondence to finger position, so a clipped action
+#:                              guarantees nothing about where the fingers end up; the tendon simply
+#:                              presses them into the stop
+#:   all others   -             0.0
+#:
+#: Two tolerances are needed because the units differ. A single 0.05 bound would exceed the fingers'
+#: entire 0.04 m travel and make the assertion vacuous for them; a single *relative* bound fails too,
+#: since the fingers penetrate 16% of their range while joint2 penetrates 0.8% of its. Shrinking
+#: either would mean editing solimp/solref on Menagerie's joints, which §3 keeps upstream.
+HINGE_LIMIT_TOL = 0.05  # rad
+SLIDE_LIMIT_TOL = 0.01  # m
+
+
 def test_joint_safety(env):
     """Robot joints remain inside model limits under clipped actions."""
     rng = np.random.default_rng(0)
     env.reset(seed=0)
 
+    # qpos[:njnt] aligns with the joint arrays only because every Panda joint is 1-DoF.
+    assert env.model.nq == env.model.njnt, "index alignment assumes 1-DoF joints"
+
     limited = env.model.jnt_limited.astype(bool)
     lo = env.model.jnt_range[:, 0]
     hi = env.model.jnt_range[:, 1]
+    # Per-joint tolerance, so every joint is compared against its own limit in its own units.
+    tol = np.where(
+        env.model.jnt_type == mujoco.mjtJoint.mjJNT_SLIDE, SLIDE_LIMIT_TOL, HINGE_LIMIT_TOL
+    )
 
     for step in range(1000):
         action = rng.uniform(-1.0, 1.0, size=env.model.nu).astype(np.float32)
         env.step(action)
 
         qpos = env.data.qpos[: env.model.njnt]
-        assert np.all(qpos[limited] >= lo[limited] - 1e-6), f"joint below limit at step {step}"
-        assert np.all(qpos[limited] <= hi[limited] + 1e-6), f"joint above limit at step {step}"
+        violated = limited & (((lo - qpos) > tol) | ((qpos - hi) > tol))
+        if violated.any():
+            j = int(np.argmax(violated))
+            name = mujoco.mj_id2name(env.model, mujoco.mjtObj.mjOBJ_JOINT, j)
+            unit = "m" if env.model.jnt_type[j] == mujoco.mjtJoint.mjJNT_SLIDE else "rad"
+            pytest.fail(
+                f"step {step}: joint {j} ({name}) at {qpos[j]:.5f} {unit}, "
+                f"limits [{lo[j]:.5f}, {hi[j]:.5f}] {unit}, tolerance {tol[j]} {unit}"
+            )
 
 
 # ----------------------------------------------------------- Target sampling
@@ -183,32 +216,33 @@ def test_reward_monotonicity(env):
     only when it brings p_ee closer to g -- and the reward is asserted to rise on every accepted
     move. Driving the arm with the controller instead would test the position servos, not r(d).
     """
-    env.reset(seed=0)
     rng = np.random.default_rng(0)
-
-    prev_d = env._distance()
-    prev_r = env._task_reward()
     accepted = 0
 
-    for _ in range(3000):
-        candidate = env.data.qpos.copy()
-        candidate[:7] += rng.normal(0.0, 0.02, size=7)
+    # Restart from a fresh pose and target each episode: a single hill-climb stalls once it reaches a
+    # local optimum, after which almost no perturbation reduces d and the row stops exercising r(d).
+    for seed in range(10):
+        env.reset(seed=seed)
+        prev_d = env._distance()
+        prev_r = env._task_reward()
 
-        saved = env.data.qpos.copy()
-        env.data.qpos[:] = candidate
-        mujoco.mj_forward(env.model, env.data)
-
-        d = env._distance()
-        if d < prev_d:
-            r = env._task_reward()
-            assert r > prev_r, (
-                f"distance fell {prev_d:.6f} -> {d:.6f} but reward fell {prev_r:.6f} -> {r:.6f}"
-            )
-            prev_d, prev_r = d, r
-            accepted += 1
-        else:
-            env.data.qpos[:] = saved
+        for _ in range(300):
+            saved = env.data.qpos.copy()
+            env.data.qpos[:7] += rng.normal(0.0, 0.02, size=7)
             mujoco.mj_forward(env.model, env.data)
+
+            d = env._distance()
+            if d < prev_d:
+                r = env._task_reward()
+                assert r > prev_r, (
+                    f"end effector moved toward the target (d {prev_d:.6f} -> {d:.6f}) "
+                    f"but reward fell ({prev_r:.6f} -> {r:.6f})"
+                )
+                prev_d, prev_r = d, r
+                accepted += 1
+            else:
+                env.data.qpos[:] = saved
+                mujoco.mj_forward(env.model, env.data)
 
     assert accepted >= 20, f"only {accepted} approaching moves found; test is not exercising r(d)"
 
