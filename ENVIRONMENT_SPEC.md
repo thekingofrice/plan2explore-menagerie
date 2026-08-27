@@ -91,12 +91,28 @@ matters with position actuators: resetting `qpos` while leaving `ctrl` at zero w
 joint toward position 0 and produce a lurch on the first step of every episode.
 
 The box sits in front of the base, well inside the Panda's ~0.85 m reach and above the floor, so every
-corner is comfortably reachable. `tests/test_target_sampling.py` asserts samples stay inside it;
-`scripts/stress_rollout.py` reports the achieved target-distance distribution as a reachability check.
+corner is comfortably reachable. `tests/test_target_sampling.py` asserts samples stay inside it.
 
-`alpha = 10` gives `r(5 cm) = 0.98`, `r(30 cm) = 0.41`, `r(60 cm) = 0.03` — an informative gradient
-across the entire box, so the task actor gets signal from anywhere in the workspace rather than only
-near the goal.
+### Measured start-state distribution (2000 seeds, 2026-08-25)
+
+| Quantity | Value |
+|---|---|
+| `p_ee` at `home` | `(0.5458, 0.0006, 0.5254)` |
+| `d0` min / median / max | `0.017` / `0.272` / `0.498` m |
+| Episodes starting inside the 5 cm tolerance | **1.05 %** |
+| Episodes starting within 10 cm | 5.15 % |
+| Median start reward | `0.478` |
+
+`p_ee(home)` lies **inside** the target box on all three axes, so `g` can be drawn essentially at the
+start position. This puts a **~1 % floor under the success rate**: a policy that does nothing at all
+scores about 1 %. Accepted deliberately rather than patched, so that sampling stays exactly
+uniform-in-box as specified. §13's success rate must be read against a 1 % no-op baseline, not 0 %.
+§14's random-action baseline measures the same floor directly.
+
+`alpha = 10` is **frozen** and confirmed against this measured distribution: `r(0.017) = 0.997`,
+`r(0.27) = 0.478`, `r(0.50) = 0.082`. The reward spans its full range across the distances the task
+actually produces, rather than saturating near 1 or collapsing to 0 — so the task actor gets an
+informative gradient from anywhere in the box.
 
 Joint jitter exists so different seeds produce different initial states, not just different targets
 (§10 "Seed separation"). It is small enough not to disturb the `home` pose's kinematic character.

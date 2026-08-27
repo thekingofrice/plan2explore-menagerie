@@ -193,9 +193,9 @@ class MenageriePandaReach(gym.Env):
     def _task_reward(self) -> float:
         """Bounded dense reward r_task = exp(-alpha * d^2) (§8.1), with alpha frozen.
 
-        alpha is provisional at 10.0 until scripts/stress_rollout.py measures the real distance
-        distribution; §8.1 requires it frozen before training, so the §10 stress rollout is the last
-        point at which it may change.
+        alpha = 10.0 is FROZEN, confirmed against the measured start-state distribution over 2000
+        seeds (ENVIRONMENT_SPEC.md): r(0.017)=0.997, r(0.27 median)=0.478, r(0.50)=0.082. The reward
+        spans its full range across the distances the task actually produces.
 
         This reward exists ONLY so the task actor can be evaluated. The exploration actor optimizes
         Plan2Explore's intrinsic objective and never sees it.
