@@ -1,0 +1,51 @@
+# menagerie_panda_reach.yaml
+#
+# Implements: References/SelfEx-WM_Notes.tex §11.1 Phase 5 Option A.
+# Installed to sheeprl/sheeprl/configs/env/menagerie_panda_reach.yaml by
+# scripts/install_env_wrapper.sh.
+#
+# Every wrapper argument below is a constant frozen in ENVIRONMENT_SPEC.md (§8.1-§8.4). This file is
+# the single place they are supplied to the code; the defaults in menagerie_panda.py match it so the
+# class stays usable standalone in tests.
+
+defaults:
+  - default
+  - _self_
+
+id: MenageriePandaReach
+
+# §8.4: the environment already integrates dt_control = 0.05 s over 25 physics substeps, so SheepRL
+# must not repeat actions on top of that.
+action_repeat: 1
+
+# Panda Reach is a vector-observation task (§8.2) with no CNN keys, so nothing renders during
+# training. Video capture is turned on only for evaluation.
+capture_video: false
+
+# §8: 100 control steps = 5.0 s. The environment truncates on its own; this keeps SheepRL's view of
+# the horizon consistent with the environment's.
+max_episode_steps: 100
+
+wrapper:
+  _target_: sheeprl.envs.menagerie_panda.MenageriePandaReach
+  seed: ${seed}
+
+  # xml_path is deliberately omitted: menagerie_panda.py resolves it from its own file location, so
+  # it works whether launched from the repo root or from sheeprl/, and follows the Option A symlink
+  # back to the pinned Menagerie checkout.
+
+  # §8.4 Control interval
+  control_dt: 0.05
+  max_episode_steps: 100
+
+  # §8.1 Task
+  alpha: 10.0
+  success_tol: 0.05
+  target_box_low: [0.30, -0.30, 0.20]
+  target_box_high: [0.60, 0.30, 0.60]
+  joint_jitter: 0.05
+
+  # §9 Rendering. Off during training; used by evaluation videos and the §10 render test.
+  render_mode: null
+  render_height: 480
+  render_width: 640

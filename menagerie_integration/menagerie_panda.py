@@ -20,6 +20,7 @@ This file must never import from sheeprl. It is a plain Gymnasium environment, w
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
@@ -29,10 +30,18 @@ from gymnasium import spaces
 
 # --- §8 frozen constants (see ENVIRONMENT_SPEC.md) --------------------------
 
-#: Loaded unmodified from the pinned Menagerie checkout. Relative to the repository root.
-#: Menagerie's own scene.xml is used directly rather than a task MJCF of ours -- see
-#: ENVIRONMENT_SPEC.md "Why no task MJCF".
-DEFAULT_XML = "third_party/mujoco_menagerie/franka_emika_panda/scene.xml"
+#: Repository root, resolved from this file's own location rather than the working directory.
+#: Path.resolve() follows the §11.1 Option A symlink from sheeprl/sheeprl/envs/menagerie_panda.py
+#: back to menagerie_integration/menagerie_panda.py, whose parent is the repo root. This matters
+#: because SheepRL is launched from the sheeprl/ directory, so a path relative to the caller's cwd
+#: would not resolve.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+#: Loaded unmodified from the pinned Menagerie checkout. Menagerie's own scene.xml is used directly
+#: rather than a task MJCF of ours -- see ENVIRONMENT_SPEC.md "Why no task MJCF".
+DEFAULT_XML = str(
+    REPO_ROOT / "third_party" / "mujoco_menagerie" / "franka_emika_panda" / "scene.xml"
+)
 
 DEFAULT_CONTROL_DT = 0.05           # §8.4
 DEFAULT_MAX_EPISODE_STEPS = 100     # 5.0 s at 0.05 s/step

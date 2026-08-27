@@ -242,7 +242,24 @@ No global RNG (`np.random.*`, `random.*`) is used anywhere in the environment.
 Rendering is off during training (`capture_video: False`); it exists for evaluation videos and for
 `tests/test_render.py`.
 
-## 10. Out of scope for Panda Reach
+## 10. Known issues
+
+**Intermittent SIGFPE in `mj_step` (2026-08-25, unresolved).** One `pytest tests/` run died with
+`Floating point exception (core dumped)` inside `mujoco.mj_step`, called from `env.step` during the
+§10 "Action bounds" row. A native SIGFPE kills the process outright, so there is no Python traceback.
+Running that test standalone was clean, and a subsequent full-suite run passed with all ten rows
+green. **It disappeared rather than being fixed.**
+
+Not reproduced often enough to diagnose. Candidates, in order of suspicion: floating-point traps
+enabled somewhere in the import path, turning a normally harmless underflow inside MuJoCo into a
+fatal signal; the leaked `MjModel`/`MjData` pair from the "API test" row, which is the only env in
+the suite never closed; or genuine solver divergence under sustained maximum control authority.
+
+Relevant because §12's budgets step this environment 10^5-10^6 times. A crash rare enough to hide in
+a test suite is near-certain over a Gate C run. If a training run dies with no Python traceback, this
+is the first thing to check — not a Plan2Explore or SheepRL bug.
+
+## 11. Out of scope for Panda Reach
 
 Contact, objects, and the table are deliberately absent. Free-space reaching isolates environment
 correctness, action scaling, state estimation, Plan2Explore learning, exploration coverage, and task
