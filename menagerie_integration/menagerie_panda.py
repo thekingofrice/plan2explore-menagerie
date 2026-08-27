@@ -195,9 +195,10 @@ class MenageriePandaReach(gym.Env):
         """Append the finished episode's outcome.
 
         Called from reset rather than on truncation: SheepRL's vectorized wrapper auto-resets, so
-        this is the only point guaranteed to see every episode's final state. ``total_steps`` gives
-        the §13 curves an honest x-axis -- with several environments interleaving, an episode's
-        ordinal is not proportional to the step it ended at.
+        that is the only point guaranteed to see every episode's final state. Also called from close,
+        so the episode in flight when a run ends is not dropped. ``total_steps`` gives the §13 curves
+        an honest x-axis -- with several environments interleaving, an episode's ordinal is not
+        proportional to the step it ended at.
         """
         self._episode_file.write(
             np.array(
@@ -381,9 +382,14 @@ class MenageriePandaReach(gym.Env):
         return self._renderer.render()
 
     def close(self) -> None:
+        """Release the renderer and trajectory files, recording the episode still in flight."""
         if self._renderer is not None:
             self._renderer.close()
             self._renderer = None
+
+        if self._episode_file is not None and self.steps > 0:
+            self._record_episode()
+
         for attr in ("_ee_file", "_episode_file"):
             handle = getattr(self, attr, None)
             if handle is not None:
