@@ -155,11 +155,10 @@ class MenageriePandaReach(gym.Env):
         self._episode_return = 0.0
         self._total_steps = 0
 
+        # Files are opened lazily on the first step, not here -- see _open_trajectory_files.
         self._traj_dir = Path(trajectory_log) if trajectory_log else None
         self._ee_file = None
         self._episode_file = None
-        if self._traj_dir is not None:
-            self._open_trajectory_files()
 
         # Renderer is lazy: it needs a GL context, and the env must import and step without one.
         self.render_height = int(render_height)
@@ -185,6 +184,10 @@ class MenageriePandaReach(gym.Env):
         because both are appended to across a multi-hour run and must survive an abrupt kill: there
         is no header to finalize. Filenames are per-instance because a vectorized run has several
         environments live in separate processes.
+
+        Called on the first step rather than from __init__. SheepRL's vectorized wrapper constructs a
+        throwaway environment purely to read the observation and action spaces, and never steps it;
+        opening files eagerly left a zero-length pair behind that the reader then tried to parse.
         """
         self._traj_dir.mkdir(parents=True, exist_ok=True)
         tag = f"{os.getpid()}_{id(self):x}"
@@ -354,7 +357,9 @@ class MenageriePandaReach(gym.Env):
         reward = self._task_reward()
         self._episode_return += reward
 
-        if self._ee_file is not None:
+        if self._traj_dir is not None:
+            if self._ee_file is None:
+                self._open_trajectory_files()
             self._ee_file.write(self._ee_position().astype(np.float32).tobytes())
 
         return obs, reward, False, self.steps >= self.max_episode_steps, self._info()
