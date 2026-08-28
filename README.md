@@ -7,7 +7,7 @@ Standalone Plan2Explore (DreamerV3, SheepRL) baseline on MuJoCo Menagerie robot 
 This repository is **self-contained**. It imports no external research codebase, methodology,
 representation, dataset, or evaluation code. Its two upstream dependencies — SheepRL and MuJoCo
 Menagerie — are pinned by commit SHA in [`UPSTREAM.md`](UPSTREAM.md) and cloned by
-`scripts/phase0_freeze.sh`.
+`SYNTAX.md`.
 
 ## Algorithm-purity rule
 
@@ -25,7 +25,8 @@ Modifications are restricted to the environment side:
 
     adapt the environment to the baseline, not the baseline to the experiment.
 
-`scripts/verify_algorithm_untouched.sh` enforces this and must pass before any run is reported.
+Verify with `git -C sheeprl status --porcelain` (nothing under `algos/`) and
+`git -C sheeprl rev-parse HEAD` against the pin in `UPSTREAM.md`.
 
 ### Where the two Option-A files actually live
 
@@ -61,45 +62,32 @@ Every file in this repository implements a specific section of
 | File | Notes section |
 |---|---|
 | `README.md`, `.gitignore` | §5 Repository Layout |
-| `UPSTREAM.md` | §6 Phase 0: Freeze the Software; §17 Reproducibility Manifest |
-| `scripts/phase0_freeze.sh` | §6 Phase 0: Freeze the Software |
-| `scripts/record_upstream.sh` | §6 Phase 0 (commit SHAs + toolchain versions) |
-| `scripts/phase1_install.sh` | §7 Phase 1: Install and Validate SheepRL Before Menagerie |
-| `scripts/smoke_upstream.sh` | §7 Phase 1 (upstream smoke test); §12.1 Gate A |
-| `ENVIRONMENT_SPEC.md` | §8 Phase 2: First Menagerie Task — Panda Reach (§8.1–§8.4) |
-| `menagerie_integration/menagerie_panda.py` | §8.1–§8.4 task/obs/action/control; §9 Phase 3 Gymnasium env |
-| `menagerie_integration/menagerie_panda_reach.yaml` | §11.1 Phase 5 Option A |
-| `scripts/install_env_wrapper.sh` | §11.1 Phase 5 Option A |
-| `scripts/verify_algorithm_untouched.sh` | §3 Algorithm-Purity Rule |
-| `tests/test_env_api.py` | §10 Phase 4 — "API test" |
-| `tests/test_reset_determinism.py` | §10 Phase 4 — "Reset determinism" |
-| `tests/test_action_bounds.py` | §10 Phase 4 — "Action bounds" |
-| `tests/test_zero_action.py` | §10 Phase 4 — "Zero action" |
-| `tests/test_finite_state.py` | §10 Phase 4 — "Finite state" |
-| `tests/test_joint_safety.py` | §10 Phase 4 — "Joint safety" |
-| `tests/test_target_sampling.py` | §10 Phase 4 — "Target sampling" |
-| `tests/test_reward.py` | §10 Phase 4 — "Reward monotonicity" |
-| `tests/test_render.py` | §10 Phase 4 — "Render test" |
-| `tests/test_seed_separation.py` | §10 Phase 4 — "Seed separation" |
-| `scripts/stress_rollout.py` | §10 Phase 4 (several-thousand-step random-control stress test) |
-| `scripts/smoke_panda.sh` | §12.1 Gate A on the Panda task |
-| `scripts/train_panda_reach.sh` | §12.2 Gate B pilot; §12.3 Gate C baseline |
-| `scripts/eval_panda_reach.sh` | §13.1 Task metrics (task actor evaluation) |
-| `scripts/metrics/task_metrics.py` | §13.1 Task metrics |
-| `scripts/metrics/coverage.py` | §13.2 Exploration metrics (workspace coverage) |
-| `scripts/metrics/world_model_metrics.py` | §13.3 World-model metrics |
-| `scripts/random_baseline.py` | §14 Phase 8: Random Baseline |
-| `scripts/write_manifest.py` | §17 Reproducibility Manifest |
-| `menagerie_tasks/` *(deferred)* | §8 / §15 task MJCF — see ENVIRONMENT_SPEC.md "Why no task MJCF" |
+| `SYNTAX.md` | §18 Minimal Execution Order; §19 Definition of Success — every command, with flags explained |
+| `UPSTREAM.md` | §6 Phase 0: Freeze the Software — pins, toolchain, and every run-affecting decision |
+| `ENVIRONMENT_SPEC.md` | §8 Phase 2: First Menagerie Task — Panda Reach (§8.1–§8.4), all frozen constants |
+| `requirements-lock.txt` | §6, §19 — `pip freeze --all` of the Python 3.11 venv |
+| `menagerie_integration/menagerie_panda.py` | §8.1–§8.4 task/obs/action/control; §9 Phase 3 Gymnasium env; §13 trajectory logging |
+| `menagerie_integration/menagerie_panda_reach.yaml` | §11.1 Phase 5 Option A env config |
+| `scripts/install_env_wrapper.sh` | §11.1 Phase 5 Option A — links both files into the SheepRL checkout |
+| `scripts/common.sh` | shared plumbing: paths, pins, `check_pins()` |
+| `tests/test_environment.py` | §10 Phase 4 — all ten rows of the table, one test each |
+| `scripts/metrics.py` | §13.1 task, §13.2 exploration, §13.3 world-model metrics |
+| `scripts/random_baseline.py` | §14 Phase 8: Random Baseline — drives the uniform-random policy |
+| `scripts/baseline_metrics.py` | §14 Phase 8 — metrics for a baseline run (no world model, so no §13.3) |
+
+Phase 0 and Phase 1 have no scripts by choice: they are one-time, environment-dependent setup, and
+`SYNTAX.md` gives the commands directly.
 
 ## Quickstart (Linux + CUDA)
 
-    bash scripts/phase0_freeze.sh          # clone + pin SheepRL and Menagerie, record SHAs
-    bash scripts/phase1_install.sh         # python3.11 venv, pip install -e ".[mujoco,dev,test]"
-    bash scripts/install_env_wrapper.sh    # Option A: link wrapper + config into the SheepRL tree
-    bash scripts/smoke_upstream.sh         # Gate A on stock Gymnasium MuJoCo, before any robot code
-    pytest tests/                          # Phase 4 environment tests
-    bash scripts/smoke_panda.sh            # tiny Plan2Explore run on MenageriePandaReach
+**See [`SYNTAX.md`](SYNTAX.md)** for every command with its flags explained. In outline:
+
+1. Clone and pin SheepRL and Menagerie to the SHAs in `UPSTREAM.md` (§6)
+2. `python3.11 -m venv .venv311`, install from `requirements-lock.txt` (§7)
+3. `bash scripts/install_env_wrapper.sh` — Option A links into the SheepRL tree (§11.1)
+4. `pytest tests/` — the §10 environment tests
+5. Train, then `python scripts/metrics.py run ...` per seed (§12, §13)
+6. `python scripts/random_baseline.py ...` and `scripts/baseline_metrics.py` (§14)
 
 ## Notes on versions
 

@@ -309,6 +309,10 @@ def world_model_metrics(logdir: str) -> dict:
     )
     acc.Reload()
 
+    # Exploration-critic metrics are suffixed with the critic name, per the p2e_dv3 convention
+    # <metric_key>_<critic_key>. cfg.algo.critics_exploration has two entries, `intrinsic` and
+    # `extrinsic`, so "Rewards/intrinsic" is really "Rewards/intrinsic_intrinsic" -- the suffix
+    # appended to a key that was already called intrinsic. Not a typo; do not "correct" it.
     wanted = [
         # §13.3
         "Loss/world_model_loss",
@@ -317,13 +321,16 @@ def world_model_metrics(logdir: str) -> dict:
         "State/kl",
         "Loss/state_loss",
         "Loss/ensemble_loss",
-        # §13.2 -- the algorithm-side exploration terms
-        "Rewards/intrinsic",
+        # §13.2 -- intrinsic reward, which in Plan2Explore IS the ensemble disagreement:
+        # reward = next_state_embedding.var(0).mean(-1) * intrinsic_reward_multiplier, and the
+        # multiplier is 1. One quantity, not two.
+        "Rewards/intrinsic_intrinsic",
         # §12.1's actor/critic finiteness
         "Loss/policy_loss_task",
         "Loss/value_loss_task",
         "Loss/policy_loss_exploration",
-        "Loss/value_loss_exploration",
+        "Loss/value_loss_exploration_intrinsic",
+        "Loss/value_loss_exploration_extrinsic",
     ]
 
     available = set(acc.Tags().get("scalars", []))
