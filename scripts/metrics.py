@@ -73,9 +73,17 @@ def reference_workspace(env, n_samples: int = REFERENCE_SAMPLES, seed: int = 0) 
     return voxelize(positions)
 
 
-def workspace_coverage(ee_positions: np.ndarray, reference: set) -> dict:
-    """C_workspace = #visited voxels / #reachable voxels (§13.2)."""
-    visited = voxelize(ee_positions)
+def workspace_coverage(ee_per_env: list[np.ndarray], reference: set) -> dict:
+    """C_workspace = #visited voxels / #reachable voxels (§13.2).
+
+    Takes one position array per environment and unions the voxels they visited. Grouping does not
+    affect the result -- a set union is order-independent -- so this number is identical to what a
+    concatenated array would give, and is correct for any num_envs.
+    """
+    visited: set = set()
+    for positions in ee_per_env:
+        visited |= voxelize(positions)
+
     # Visits outside the sampled reference set are possible (the reference is itself a sample), so
     # the ratio is reported against the union to keep it bounded by 1.
     reachable = reference | visited
@@ -84,6 +92,7 @@ def workspace_coverage(ee_positions: np.ndarray, reference: set) -> dict:
         "reference_voxels": len(reference),
         "C_workspace": len(visited) / max(len(reachable), 1),
         "voxel_size_m": VOXEL_SIZE,
+        "n_envs": len(ee_per_env),
     }
 
 
@@ -154,7 +163,8 @@ def task_metrics(data: dict) -> dict:
 
 def exploration_metrics(data: dict, reference: set) -> dict:
     """§13.2, minus the intrinsic-reward and ensemble terms, which come from TensorBoard."""
-    out = workspace_coverage(data["ee_positions"], reference)
+    # A rollout drives a single environment, so its positions are one "per-env" array.
+    out = workspace_coverage([data["ee_positions"]], reference)
     out["actuator_saturation_fraction"] = float(np.mean(data["saturations"]))
     out["joint_limit_visitation"] = data["joint_limit_fraction"].round(6).tolist()
     # State-space coverage: the same voxel idea applied to the full observation, reported as the
@@ -176,54 +186,98 @@ def _read_rows(path: Path, width: int) -> np.ndarray:
     return flat[: len(flat) - len(flat) % width].reshape(-1, width)
 
 
-def read_trajectories(traj_dir: Path) -> tuple[np.ndarray, np.ndarray]:
+def read_trajectories(
+    traj_dir: Path, max_steps: int | None = None
+) -> tuple[list[np.ndarray], np.ndarray]:
     """Read the streams written by MenageriePandaReach's trajectory_log.
 
-    A vectorized run writes one pair of files per environment process; all are concatenated.
-    Returns (ee_positions, episodes) with shapes (N, 3) and (M, 4), an episode row being
-    (total_steps, return, final_distance, success).
+    Returns the position arrays as a LIST, one per environment process, rather than concatenated.
+    Concatenating loses which positions came from which environment, and since the files are written
+    independently, gluing them end to end produces "all of env 0, then part of env 1" -- fine for a
+    final coverage number, which is an order-independent set union, but meaningless as a time axis.
+
+    ``max_steps`` is a ONE-OFF remedy, not routine practice: it exists solely because Gate B's seed 0
+    was launched with the wrong `algo.total_steps` and overran to ~117,200 interactions, and must be
+    analysed at the same 100,000 as seeds 1 and 2 or the seed variance is meaningless. Every
+    subsequent run sets its budget correctly and should be read with max_steps=None.
+
+    When given, it caps TOTAL interactions across all environments (SheepRL's policy_step
+    convention): each environment is truncated to max_steps // n_envs, and episode rows whose
+    per-environment step count exceeds that are dropped. Truncation is lossless because training is
+    causal -- the retained prefix is byte-identical to what stopping at that budget would have
+    produced.
+
+    Episodes are returned concatenated, shape (M, 4): (total_steps, return, final_distance, success),
+    where total_steps is PER-ENVIRONMENT (a factor of n_envs smaller than TensorBoard's policy_step).
     """
     traj_dir = Path(traj_dir)
     ee = [_read_rows(p, 3) for p in sorted(traj_dir.glob("ee_*.f32"))]
     ep = [_read_rows(p, 4) for p in sorted(traj_dir.glob("episodes_*.f32"))]
     if not ee:
         raise FileNotFoundError(f"no ee_*.f32 files in {traj_dir}")
-    return np.concatenate(ee), np.concatenate(ep) if ep else np.empty((0, 4), np.float32)
+
+    if max_steps is not None:
+        per_env = max_steps // len(ee)
+        ee = [a[:per_env] for a in ee]
+        ep = [rows[rows[:, 0] <= per_env] for rows in ep]
+
+    episodes = np.concatenate(ep) if ep else np.empty((0, 4), np.float32)
+    return ee, episodes
 
 
-def coverage_curve(ee_positions: np.ndarray, reference: set, n_points: int = 50) -> dict:
-    """C_workspace as a function of step, by voxelizing the trajectory cumulatively.
+def coverage_curve(ee_per_env: list[np.ndarray], reference: set, n_points: int = 50) -> dict:
+    """C_workspace as a function of total environment steps.
 
     A single end-of-run number cannot distinguish an agent still finding new regions from one that
     plateaued early, which is the substance of the exploration claim §14 tests.
+
+    Environments step in lockstep -- one step each per iteration -- so coverage at total step T is
+    the union over every environment's first T // n_envs positions. Taking a prefix of the
+    environments concatenated end to end would instead give "all of env 0 plus part of env 1", which
+    is not a point in training time at all. At num_envs=1 this reduces to the plain chronological
+    prefix.
+
+    ``steps`` is reported in TOTAL interactions, so it shares an x-axis with TensorBoard's
+    policy_step rather than with the per-environment counts in the episode rows.
     """
-    n = len(ee_positions)
-    if n == 0:
+    n_envs = len(ee_per_env)
+    per_env_len = min((len(a) for a in ee_per_env), default=0)
+    if per_env_len == 0:
         return {"steps": [], "C_workspace": []}
 
-    marks = np.unique(np.linspace(n // n_points, n, n_points).astype(int))
+    marks = np.unique(
+        np.linspace(max(per_env_len // n_points, 1), per_env_len, n_points).astype(int)
+    )
     steps, values = [], []
     for m in marks:
-        visited = voxelize(ee_positions[:m])
+        visited: set = set()
+        for positions in ee_per_env:
+            visited |= voxelize(positions[:m])
         values.append(len(visited) / max(len(reference | visited), 1))
-        steps.append(int(m))
+        steps.append(int(m * n_envs))
     return {"steps": steps, "C_workspace": values}
 
 
-def run_metrics(traj_dir: Path, reference: set) -> dict:
+def run_metrics(traj_dir: Path, reference: set, max_steps: int | None = None) -> dict:
     """§13.1 and §13.2 from a completed run's recorded trajectory.
 
     The acting policy during exploration is the EXPLORATION actor, so the task numbers describe what
     that actor achieved -- they are not an evaluation of the task actor, which needs sheeprl_eval.py
     against a checkpoint. Coverage is unambiguous: it is exactly the set of positions visited while
     exploring, which is what §13.2 asks for.
+
+    ``max_steps`` is the one-off cap described in read_trajectories; leave it None for any run whose
+    budget was set correctly.
     """
-    ee, ep = read_trajectories(traj_dir)
+    ee, ep = read_trajectories(traj_dir, max_steps=max_steps)
     exploration = workspace_coverage(ee, reference)
     exploration["coverage_curve"] = coverage_curve(ee, reference)
 
     out = {
-        "steps_recorded": int(len(ee)),
+        # Total interactions across all environments, matching TensorBoard's policy_step. ee is a
+        # list of per-environment arrays, so this sums them rather than counting the list.
+        "steps_recorded": int(sum(len(a) for a in ee)),
+        "steps_per_env": [int(len(a)) for a in ee],
         "episodes_recorded": int(len(ep)),
         "exploration_metrics": exploration,
     }
@@ -317,6 +371,13 @@ def main() -> int:
     p_run.add_argument("--logdir", required=True, help="the run's version_0 directory")
     p_run.add_argument("--seed", type=int, required=True)
     p_run.add_argument("--reference-samples", type=int, default=REFERENCE_SAMPLES)
+    p_run.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="ONE-OFF: cap total interactions, for a run whose budget was set wrong. Gate B seed 0 "
+        "overran to ~117200 and needs --max-steps 100000 to match seeds 1 and 2. Omit otherwise.",
+    )
     p_run.add_argument("--out", type=Path, required=True)
 
     args = parser.parse_args()
@@ -350,7 +411,8 @@ def main() -> int:
             "seed": args.seed,
             "traj_dir": str(args.traj_dir),
             "logdir": args.logdir,
-            **run_metrics(args.traj_dir, reference),
+            "max_steps": args.max_steps,
+            **run_metrics(args.traj_dir, reference, max_steps=args.max_steps),
             "world_model_metrics": world_model_metrics(args.logdir),
         }
 

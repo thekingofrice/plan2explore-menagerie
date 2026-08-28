@@ -173,6 +173,39 @@ frozen and recorded like `alpha` and the model size.
 `algo.total_steps` defaults to **5,000,000** — far beyond even §12.3's 10^6 — so every gate must set
 it explicitly.
 
+## Gate B (§12.2): seed 0 overran, truncate to 100,000
+
+Seed 0 was launched with `algo.total_steps=500000` by mistake; §12.2's budget is 10^5. It was stopped
+at ~117,200 total interactions (29,300 per env x 4 envs) and **must be analysed truncated to the
+first 100,000 total steps**, matching seeds 1 and 2 which were launched at the correct budget.
+
+Legitimate because 10^5 was declared by §12.2 before the run, not chosen after inspecting results.
+Only losses and intrinsic reward were viewed while it ran -- health monitoring, not decisive metrics
+(§12.3). Truncation is lossless: training is causal, so the first 100,000 steps are byte-identical to
+what stopping there would have produced.
+
+Analysing seeds at different step counts would make the seed-to-seed variance meaningless, so
+`scripts/metrics.py` needs a `--max-steps` cap applied both to the coverage computation and to the
+episode rows before Gate B can be reported.
+
+### Step-count conventions (three different numbers)
+
+| Quantity | Counts | Seed 0 at stop |
+|---|---|---|
+| TensorBoard `policy_step` | total interactions across all envs | 117,200 |
+| `episodes_*.f32` column 1 (`total_steps`) | steps taken by **one** environment | 29,300 |
+| index into the concatenated `ee_*.f32` array | nothing meaningful | - |
+
+`policy_step` advances by `num_envs` per iteration, so TensorBoard's axis is genuine total
+interactions. The per-episode column is per-environment, a factor of `num_envs` smaller.
+
+`read_trajectories` concatenates the per-environment files end to end, so prefixes of that array are
+"all of env 0 plus part of env 1", not a point in training time. The final `C_workspace` is unaffected
+(a set union is order-independent), but **`coverage_curve` is wrong as written**: coverage at total
+step T is the union over each environment's first `T / num_envs` steps, which requires keeping the
+per-environment arrays separate. No re-running is needed -- the recorded data supports the correct
+computation.
+
 ## Gate A (§12.1): abbreviated by decision
 
 Run as a confirmation that the pipeline executes end to end, not as an evaluation of §12.1's pass
