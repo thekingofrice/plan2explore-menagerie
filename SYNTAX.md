@@ -161,23 +161,84 @@ Give each run its own `trajectory_log` directory. The files open in **append** m
 PID-based names, so two runs sharing a directory do not overwrite — they silently merge into one
 inflated coverage number, with no error.
 
+## 6b. Resuming a killed run
+
+`resume_from_checkpoint()` in `sheeprl/cli.py` loads the checkpoint's `config.yaml` and merges it
+over your CLI, keeping only `root_dir`, `run_name`, `algo.total_steps` and `algo.learning_starts`.
+Every other override you type is silently discarded, so the resume command is short:
+
+```bash
+# vacate the trajectory path first -- filenames carry the pid, so the resume cannot reopen the
+# old files, and both sets landing in one directory corrupts coverage_curve (see §8)
+mv "$REPO/results/runs/RUNNAME/trajectories" "$REPO/results/runs/RUNNAME/trajectories_seg0"
+
+cd "$REPO/sheeprl"
+MUJOCO_GL=egl PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python sheeprl.py \
+  exp=p2e_dv3_exploration \
+  env=menagerie_panda_reach \
+  checkpoint.resume_from=".../version_0/checkpoint/ckpt_160000_0.ckpt" \
+  algo.total_steps=500000 \
+  algo.learning_starts=0
+```
+
+| Flag | Why |
+|---|---|
+| `exp=`, `env=` | the resume raises `ValueError` unless `algo.name` and `env.id` match the checkpoint |
+| `algo.total_steps` | popped from the old config, so omitting it falls back to the stock 5,000,000. **Absolute, not remaining** — set it to the original budget |
+| `algo.learning_starts=0` | on resume the code does `learning_starts += start_iter`, so a nonzero value re-prefills the buffer with random actions mid-run. `buffer.checkpoint` defaults to `True`, so the buffer is already restored |
+
+The checkpoint carries the world model, every optimizer state, the moments, the ratio and the replay
+buffer, so the optimizer resumes with its Adam moments intact. `checkpoint.every=10000` over
+`num_envs=4` is 25 episodes exactly, so a checkpoint always lands on an episode boundary and no
+partial episode is cut. Do not delete the old run directory — with `buffer.memmap=True` the restored
+buffer reads from its `memmap_buffer/`.
+
 ## 7. Random baseline (§14)
+
+Same pipeline as §5, same budget, same seeds — the acting policy is the only difference. The script
+takes no flags of its own: every argument is forwarded to Hydra, so pass the §5 command verbatim and
+change only the two lines marked below.
 
 ```bash
 cd "$REPO"
 for SEED in 0 1 2 3 4; do
-  python scripts/random_baseline.py --steps 500000 --seed $SEED \
-    --traj-dir "$REPO/results/runs/random_seed${SEED}/trajectories"
+  MUJOCO_GL=egl PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python scripts/random_baseline.py \
+    exp=p2e_dv3_exploration \
+    env=menagerie_panda_reach \
+    env.num_envs=4 \
+    root_dir=random_baseline/MenageriePandaReach \
+    env.wrapper.trajectory_log="$REPO/results/runs/random_seed${SEED}/trajectories" \
+    algo.cnn_keys.encoder=[] algo.cnn_keys.decoder=[] \
+    algo.mlp_keys.encoder=[state] algo.mlp_keys.decoder=[state] \
+    algo.dense_units=512 algo.mlp_layers=2 \
+    algo.world_model.recurrent_model.recurrent_state_size=512 \
+    algo.world_model.transition_model.hidden_size=512 \
+    algo.world_model.representation_model.hidden_size=512 \
+    algo.total_steps=500000 \
+    algo.run_test=False \
+    metric.log_every=1000 \
+    checkpoint.every=10000 \
+    fabric.accelerator=gpu fabric.devices=1 \
+    seed=$SEED
 done
 ```
 
-CPU-only — no GPU, no world model — so it can run alongside a training job. `--steps` must match the
-training budget being compared against, and seeds must match, per §14's "same number of environment
-interactions ... and seeds where appropriate."
+| Differs from §5 | Why |
+|---|---|
+| `scripts/random_baseline.py` instead of `sheeprl.py` | patches `PlayerDV3.get_actions` to return `a_t ~ U([-1,1]^m)`, then hands everything to SheepRL. `sheeprl/algos/` is untouched on disk, so §3 holds |
+| `root_dir=random_baseline/...` | **required.** Every other key is shared, so the default run name is identical in form to a training run's and the two arms would interleave in one log directory, told apart only by timestamp |
+
+This is a full GPU training run, not a CPU stepping loop: world model, ensembles and both
+actor-critics all train on the randomly-collected data. That is what makes §14's comparison about
+the acting policy rather than about which arm had a world model, and it gives the baseline its own
+§13.3 losses and its own `Rewards/intrinsic`. Budget for it accordingly — it costs the same as the
+run it is compared against.
 
 ## 8. Metrics (§13)
 
-Per training run:
+One command for both arms — the §14 baseline is a full training run, so it has TensorBoard events
+and is read exactly like a Plan2Explore run:
 
 ```bash
 RUN=$(ls -td sheeprl/logs/runs/p2e_dv3_exploration/MenageriePandaReach/*/ | head -1)version_0
@@ -189,13 +250,18 @@ python scripts/metrics.py run \
   --out results/summaries/gateB_seed0.json
 ```
 
-Per baseline run (no `--logdir`: a random policy has no world model or TensorBoard events):
+For the baseline, point `--traj-dir` and `--logdir` at that seed's `random_baseline/...` run.
+Comparing the two arms requires the same `--reference-samples` for both.
 
-```bash
-python scripts/baseline_metrics.py \
-  --traj-dir results/runs/random_seed0/trajectories \
-  --seed 0 --out results/summaries/random_seed0.json
-```
+A resumed run leaves one trajectory directory per segment. Pass them oldest first, with the step
+count from each checkpoint resumed at; the segments are cut at their seams and concatenated per
+environment:
+
+    --traj-dir <segment 0> --traj-dir <segment 1> --resumed-at <ckpt step> --num-envs 4
+
+`--num-envs` is checked against the file count in each segment. That is what catches two segments
+sharing a directory, which otherwise reads N files as N environments and corrupts `coverage_curve`
+without erroring.
 
 `--reference-samples` (default 200000) builds `C_workspace`'s denominator by sampling joint
 configurations. **Use the same value for every run you compare**, or the coverage ratios differ for

@@ -18,6 +18,10 @@ Usage:
 
     # world-model losses from a finished run
     python scripts/metrics.py losses --logdir sheeprl/logs/runs/p2e_dv3_exploration/... --out results/summaries/run0_losses.json
+
+    # a run resumed from ckpt_160000_0.ckpt: one --traj-dir per segment, oldest first
+    python scripts/metrics.py run --traj-dir .../trajectories_seg0 --traj-dir .../trajectories \
+        --resumed-at 160000 --num-envs 4 --logdir ... --seed 0 --out results/summaries/gateC_seed0.json
 """
 
 from __future__ import annotations
@@ -32,15 +36,15 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "menagerie_integration"))
 
-from menagerie_panda import MenageriePandaReach  # noqa: E402
-
 #: §13.2 voxel edge length for workspace coverage, metres. Chosen equal to §8.1's 5 cm success
 #: tolerance so a "visited voxel" is the same spatial resolution the task is scored at.
 VOXEL_SIZE = 0.05
 
-#: Number of random joint configurations used to build the reference reachable set (§13.2's
-#: denominator). The end effector's reachable volume has no closed form, so it is sampled.
-REFERENCE_SAMPLES = 200_000
+#: §8.1's reachable box, the region targets are drawn from. Source of truth is ENVIRONMENT_SPEC.md;
+#: these must match menagerie_panda_reach.yaml. Divided into VOXEL_SIZE cubes it is C_workspace's
+#: denominator: 6 x 12 x 8 = 576 voxels.
+BOX_LOW = (0.30, -0.30, 0.20)
+BOX_HIGH = (0.60, 0.30, 0.60)
 
 
 # --------------------------------------------------------------------- §13.2
@@ -51,46 +55,47 @@ def voxelize(points: np.ndarray, voxel_size: float = VOXEL_SIZE) -> set[tuple[in
     return {tuple(v) for v in idx}
 
 
-def reference_workspace(env, n_samples: int = REFERENCE_SAMPLES, seed: int = 0) -> set:
-    """The denominator of C_workspace: voxels the end effector can reach at all (§13.2).
+def box_voxels(
+    low=BOX_LOW, high=BOX_HIGH, voxel_size: float = VOXEL_SIZE
+) -> set[tuple[int, int, int]]:
+    """C_workspace's denominator: every voxel of the §8.1 box (§13.2).
 
-    Sampled by drawing uniform joint configurations within jnt_range and running forward kinematics.
-    This is the *kinematically* reachable set -- it ignores whether a policy could get there under
-    the dynamics, which makes it a conservative (large) denominator and C_workspace a lower bound.
+    Enumerated, not sampled, so the denominator is a fixed property of the task rather than of the
+    run -- every policy is scored against the same 576 cubes, which is what makes §14's comparison
+    a comparison of policies. The epsilons absorb float division landing a hair either side of a
+    cube boundary.
     """
-    import mujoco
-
-    rng = np.random.default_rng(seed)
-    lo = env.model.jnt_range[:7, 0]
-    hi = env.model.jnt_range[:7, 1]
-
-    positions = np.empty((n_samples, 3))
-    for i in range(n_samples):
-        env.data.qpos[:7] = rng.uniform(lo, hi)
-        mujoco.mj_forward(env.model, env.data)
-        positions[i] = env._ee_position()
-
-    return voxelize(positions)
+    lo = np.floor(np.asarray(low, dtype=float) / voxel_size + 1e-9).astype(np.int64)
+    hi = np.ceil(np.asarray(high, dtype=float) / voxel_size - 1e-9).astype(np.int64)
+    return {
+        (i, j, k)
+        for i in range(lo[0], hi[0])
+        for j in range(lo[1], hi[1])
+        for k in range(lo[2], hi[2])
+    }
 
 
-def workspace_coverage(ee_per_env: list[np.ndarray], reference: set) -> dict:
-    """C_workspace = #visited voxels / #reachable voxels (§13.2).
+def workspace_coverage(ee_per_env: list[np.ndarray], box: set) -> dict:
+    """C_workspace = #box voxels visited / #box voxels (§13.2).
 
     Takes one position array per environment and unions the voxels they visited. Grouping does not
-    affect the result -- a set union is order-independent -- so this number is identical to what a
-    concatenated array would give, and is correct for any num_envs.
+    affect the result -- a set union is order-independent -- so this is identical to what a
+    concatenated array would give, and correct for any num_envs.
+
+    The arm reaches far outside the box, and those visits are not scored: the box is the region the
+    task lives in. ``visited_outside_box`` reports how much exploration that discards, so a run
+    ranging widely but ignoring the task region is visible rather than hidden.
     """
     visited: set = set()
     for positions in ee_per_env:
         visited |= voxelize(positions)
 
-    # Visits outside the sampled reference set are possible (the reference is itself a sample), so
-    # the ratio is reported against the union to keep it bounded by 1.
-    reachable = reference | visited
+    inside = visited & box
     return {
-        "visited_voxels": len(visited),
-        "reference_voxels": len(reference),
-        "C_workspace": len(visited) / max(len(reachable), 1),
+        "visited_voxels": len(inside),
+        "box_voxels": len(box),
+        "C_workspace": len(inside) / max(len(box), 1),
+        "visited_outside_box": len(visited) - len(inside),
         "voxel_size_m": VOXEL_SIZE,
         "n_envs": len(ee_per_env),
     }
@@ -161,16 +166,12 @@ def task_metrics(data: dict) -> dict:
     }
 
 
-def exploration_metrics(data: dict, reference: set) -> dict:
+def exploration_metrics(data: dict, box: set) -> dict:
     """§13.2, minus the intrinsic-reward and ensemble terms, which come from TensorBoard."""
     # A rollout drives a single environment, so its positions are one "per-env" array.
-    out = workspace_coverage([data["ee_positions"]], reference)
+    out = workspace_coverage([data["ee_positions"]], box)
     out["actuator_saturation_fraction"] = float(np.mean(data["saturations"]))
     out["joint_limit_visitation"] = data["joint_limit_fraction"].round(6).tolist()
-    # State-space coverage: the same voxel idea applied to the full observation, reported as the
-    # count of distinct cells rather than a ratio, since the reachable state set has no reference.
-    grid = np.floor(data["states"] / VOXEL_SIZE).astype(np.int64)
-    out["state_space_cells"] = int(len({tuple(row) for row in grid}))
     return out
 
 
@@ -187,41 +188,99 @@ def _read_rows(path: Path, width: int) -> np.ndarray:
 
 
 def read_trajectories(
-    traj_dir: Path, max_steps: int | None = None
+    traj_dirs: Path | list[Path],
+    max_steps: int | None = None,
+    resumed_at: list[int] | None = None,
+    num_envs: int | None = None,
 ) -> tuple[list[np.ndarray], np.ndarray]:
     """Read the streams written by MenageriePandaReach's trajectory_log.
 
-    Returns the position arrays as a LIST, one per environment process, rather than concatenated.
-    Concatenating loses which positions came from which environment, and since the files are written
-    independently, gluing them end to end produces "all of env 0, then part of env 1" -- fine for a
-    final coverage number, which is an order-independent set union, but meaningless as a time axis.
+    One position array per environment, not concatenated -- gluing the files end to end gives "all
+    of env 0, then part of env 1", meaningless as a time axis. Episodes come back concatenated,
+    (M, 4): total_steps, return, final_distance, success, with total_steps PER-ENVIRONMENT.
 
-    ``max_steps`` is a ONE-OFF remedy, not routine practice: it exists solely because Gate B's seed 0
-    was launched with the wrong `algo.total_steps` and overran to ~117,200 interactions, and must be
-    analysed at the same 100,000 as seeds 1 and 2 or the seed variance is meaningless. Every
-    subsequent run sets its budget correctly and should be read with max_steps=None.
+    A killed-and-resumed run writes fresh files, since filenames carry the pid. Pass one directory
+    per segment chronologically; ``resumed_at`` gives each seam in TOTAL interactions, the number in
+    the checkpoint filename. Segments are cut there and concatenated slot-wise -- the cross-segment
+    pairing is arbitrary because environments step in lockstep, and rows past a seam had their
+    gradient updates discarded by the resume. One directory holding every segment would read 8 files
+    as 8 environments and wreck coverage_curve; ``num_envs`` catches that.
 
-    When given, it caps TOTAL interactions across all environments (SheepRL's policy_step
-    convention): each environment is truncated to max_steps // n_envs, and episode rows whose
-    per-environment step count exceeds that are dropped. Truncation is lossless because training is
-    causal -- the retained prefix is byte-identical to what stopping at that budget would have
-    produced.
-
-    Episodes are returned concatenated, shape (M, 4): (total_steps, return, final_distance, success),
-    where total_steps is PER-ENVIRONMENT (a factor of n_envs smaller than TensorBoard's policy_step).
+    ``max_steps`` is a ONE-OFF for Gate B seed 0, which overran to ~117,200 interactions and must be
+    analysed at the same 100,000 as seeds 1 and 2. It caps total interactions across all envs.
     """
-    traj_dir = Path(traj_dir)
-    ee = [_read_rows(p, 3) for p in sorted(traj_dir.glob("ee_*.f32"))]
-    ep = [_read_rows(p, 4) for p in sorted(traj_dir.glob("episodes_*.f32"))]
-    if not ee:
-        raise FileNotFoundError(f"no ee_*.f32 files in {traj_dir}")
+    if isinstance(traj_dirs, (str, Path)):
+        traj_dirs = [traj_dirs]
+    traj_dirs = [Path(d) for d in traj_dirs]
+    resumed_at = list(resumed_at or [])
+    if len(resumed_at) != len(traj_dirs) - 1:
+        raise ValueError(
+            f"got {len(traj_dirs)} segment director{'y' if len(traj_dirs) == 1 else 'ies'} but "
+            f"{len(resumed_at)} seam(s); every segment except the last needs the total-interaction "
+            "count it was resumed at."
+        )
+
+    segments = []
+    for d in traj_dirs:
+        seg_ee = [_read_rows(p, 3) for p in sorted(d.glob("ee_*.f32"))]
+        seg_ep = [_read_rows(p, 4) for p in sorted(d.glob("episodes_*.f32"))]
+        if not seg_ee:
+            raise FileNotFoundError(f"no ee_*.f32 files in {d}")
+        segments.append([seg_ee, seg_ep])
+
+    n = len(segments[0][0])
+    for d, (seg_ee, _) in zip(traj_dirs, segments):
+        if len(seg_ee) != n:
+            raise ValueError(
+                f"segments hold different environment counts: {traj_dirs[0]} has {n} ee_*.f32 "
+                f"files, {d} has {len(seg_ee)}. Each segment directory must hold exactly one "
+                "launch's files."
+            )
+    if num_envs is not None and n != num_envs:
+        raise ValueError(
+            f"found {n} ee_*.f32 files per segment but --num-envs is {num_envs}. Two launches "
+            "writing into one directory is the usual cause: give each its own directory and pass "
+            "--traj-dir once per segment, in chronological order."
+        )
+
+    # Cut each segment back to its seam. The episode step column is that environment's own counter,
+    # which restarts at zero every segment, so the filter is per-segment and the offset comes after.
+    prev = 0
+    for k, seam_total in enumerate(resumed_at):
+        keep = seam_total // n - prev
+        if keep <= 0:
+            raise ValueError(f"seam {seam_total} is not after the previous seam ({prev * n})")
+        seg_ee, seg_ep = segments[k]
+        # Writes flush once per episode, so a killed process can leave a file a little short of its
+        # own checkpoint. Harmless at this scale, but it is real data loss and should not be silent.
+        for p, a in zip(sorted(traj_dirs[k].glob("ee_*.f32")), seg_ee):
+            if len(a) < keep:
+                print(f"  warning: {p.name} holds {len(a)} rows, {keep - len(a)} short of the seam")
+        segments[k] = [
+            [a[:keep] for a in seg_ee],
+            [rows[rows[:, 0] <= keep] for rows in seg_ep],
+        ]
+        prev = seam_total // n
+
+    ee_parts: list[list[np.ndarray]] = [[] for _ in range(n)]
+    episode_rows, offset = [], 0
+    for seg_ee, seg_ep in segments:
+        for i, a in enumerate(seg_ee):
+            ee_parts[i].append(a)
+        for rows in seg_ep:
+            rows = rows.copy()
+            rows[:, 0] += offset  # back onto one axis across the seam
+            episode_rows.append(rows)
+        offset += min(len(a) for a in seg_ee)
+
+    ee = [np.concatenate(parts) for parts in ee_parts]
 
     if max_steps is not None:
-        per_env = max_steps // len(ee)
+        per_env = max_steps // n
         ee = [a[:per_env] for a in ee]
-        ep = [rows[rows[:, 0] <= per_env] for rows in ep]
+        episode_rows = [rows[rows[:, 0] <= per_env] for rows in episode_rows]
 
-    episodes = np.concatenate(ep) if ep else np.empty((0, 4), np.float32)
+    episodes = np.concatenate(episode_rows) if episode_rows else np.empty((0, 4), np.float32)
     return ee, episodes
 
 
@@ -258,7 +317,13 @@ def coverage_curve(ee_per_env: list[np.ndarray], reference: set, n_points: int =
     return {"steps": steps, "C_workspace": values}
 
 
-def run_metrics(traj_dir: Path, reference: set, max_steps: int | None = None) -> dict:
+def run_metrics(
+    traj_dirs: Path | list[Path],
+    reference: set,
+    max_steps: int | None = None,
+    resumed_at: list[int] | None = None,
+    num_envs: int | None = None,
+) -> dict:
     """§13.1 and §13.2 from a completed run's recorded trajectory.
 
     The acting policy during exploration is the EXPLORATION actor, so the task numbers describe what
@@ -266,10 +331,11 @@ def run_metrics(traj_dir: Path, reference: set, max_steps: int | None = None) ->
     against a checkpoint. Coverage is unambiguous: it is exactly the set of positions visited while
     exploring, which is what §13.2 asks for.
 
-    ``max_steps`` is the one-off cap described in read_trajectories; leave it None for any run whose
-    budget was set correctly.
+    ``traj_dirs``, ``resumed_at`` and ``max_steps`` are described in read_trajectories.
     """
-    ee, ep = read_trajectories(traj_dir, max_steps=max_steps)
+    ee, ep = read_trajectories(
+        traj_dirs, max_steps=max_steps, resumed_at=resumed_at, num_envs=num_envs
+    )
     exploration = workspace_coverage(ee, reference)
     exploration["coverage_curve"] = coverage_curve(ee, reference)
 
@@ -296,18 +362,20 @@ def run_metrics(traj_dir: Path, reference: set, max_steps: int | None = None) ->
 
 # --------------------------------------------------------------------- §13.3
 
-def world_model_metrics(logdir: str) -> dict:
+def world_model_metrics(logdirs: str | list[str]) -> dict:
     """§13.3, read back from the TensorBoard events SheepRL already writes.
 
     Also covers the intrinsic-reward and ensemble-disagreement terms §13.2 asks for, since those are
     logged by the algorithm rather than observable from the environment.
+
+    A resumed run logs to a fresh version_N directory. Pass one logdir per segment, chronologically:
+    series are keyed by policy_step and a later segment overwrites an earlier one at a shared step,
+    so the overlap a crash leaves behind resolves to the values whose gradient history continued.
     """
     from tensorboard.backend.event_processing import event_accumulator
 
-    acc = event_accumulator.EventAccumulator(
-        str(logdir), size_guidance={event_accumulator.SCALARS: 0}
-    )
-    acc.Reload()
+    if isinstance(logdirs, (str, Path)):
+        logdirs = [logdirs]
 
     # Exploration-critic metrics are suffixed with the critic name, per the p2e_dv3 convention
     # <metric_key>_<critic_key>. cfg.algo.critics_exploration has two entries, `intrinsic` and
@@ -333,13 +401,27 @@ def world_model_metrics(logdir: str) -> dict:
         "Loss/value_loss_exploration_extrinsic",
     ]
 
-    available = set(acc.Tags().get("scalars", []))
+    series: dict[str, dict[int, float]] = {tag: {} for tag in wanted}
+    available: set[str] = set()
+    for d in logdirs:
+        acc = event_accumulator.EventAccumulator(
+            str(d), size_guidance={event_accumulator.SCALARS: 0}
+        )
+        acc.Reload()
+        tags = set(acc.Tags().get("scalars", []))
+        available |= tags
+        for tag in wanted:
+            if tag in tags:
+                for e in acc.Scalars(tag):
+                    series[tag][e.step] = e.value  # later segment wins
+
     out = {}
     for tag in wanted:
         if tag not in available:
             out[tag] = None
             continue
-        values = np.array([e.value for e in acc.Scalars(tag)])
+        steps = sorted(series[tag])
+        values = np.array([series[tag][s] for s in steps])
         out[tag] = {
             "mean": float(values.mean()),
             "std": float(values.std()),
@@ -347,6 +429,10 @@ def world_model_metrics(logdir: str) -> dict:
             "last": float(values[-1]),
             "finite": bool(np.all(np.isfinite(values))),
             "n": int(len(values)),
+            # The span is how you check the segments actually joined: it should reach the run's
+            # budget, not stop at the step the first segment died on.
+            "step_first": int(steps[0]),
+            "step_last": int(steps[-1]),
         }
     return out
 
@@ -366,18 +452,47 @@ def main() -> int:
     p_roll.add_argument("--policy", choices=["random"], default="random")
     p_roll.add_argument("--episodes", type=int, default=100)
     p_roll.add_argument("--seed", type=int, default=0)
-    p_roll.add_argument("--reference-samples", type=int, default=REFERENCE_SAMPLES)
     p_roll.add_argument("--out", type=Path, required=True)
 
     p_loss = sub.add_parser("losses", help="§13.3 from a run's TensorBoard events")
-    p_loss.add_argument("--logdir", required=True)
+    p_loss.add_argument("--logdir", action="append", required=True, dest="logdirs", metavar="DIR")
     p_loss.add_argument("--out", type=Path, required=True)
 
     p_run = sub.add_parser("run", help="every §12.2 metric for one finished training run")
-    p_run.add_argument("--traj-dir", type=Path, required=True, help="env.wrapper.trajectory_log")
-    p_run.add_argument("--logdir", required=True, help="the run's version_0 directory")
+    p_run.add_argument(
+        "--traj-dir",
+        type=Path,
+        action="append",
+        required=True,
+        dest="traj_dirs",
+        metavar="DIR",
+        help="env.wrapper.trajectory_log. Repeat once per segment, in chronological order, for a "
+        "run that was resumed from a checkpoint",
+    )
+    p_run.add_argument(
+        "--resumed-at",
+        type=int,
+        action="append",
+        default=None,
+        metavar="STEPS",
+        help="total interactions at each resume, i.e. the number in the checkpoint filename "
+        ,
+    )
+    p_run.add_argument(
+        "--num-envs",
+        type=int,
+        default=None,
+        help="env.num_envs of the run; checked against the file count per segment",
+    )
+    p_run.add_argument(
+        "--logdir",
+        action="append",
+        required=True,
+        dest="logdirs",
+        metavar="DIR",
+        help="the run's version_N directory. Repeat once per segment, in chronological order",
+    )
     p_run.add_argument("--seed", type=int, required=True)
-    p_run.add_argument("--reference-samples", type=int, default=REFERENCE_SAMPLES)
     p_run.add_argument(
         "--max-steps",
         type=int,
@@ -389,38 +504,45 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    if args.command == "rollout":
-        env = MenageriePandaReach()
-        print(f"building reference workspace from {args.reference_samples} samples...")
-        reference = reference_workspace(env, args.reference_samples, seed=args.seed)
-        print(f"  {len(reference)} reachable voxels at {VOXEL_SIZE} m")
+    box = box_voxels()
+    print(f"{len(box)} voxels in the §8.1 box at {VOXEL_SIZE} m: {BOX_LOW} to {BOX_HIGH}")
 
+    if args.command == "rollout":
+        # Imported here, not at module scope, so `run` and `losses` need no MuJoCo: the box is
+        # arithmetic, and only a live rollout needs the simulator.
+        from menagerie_panda import MenageriePandaReach
+
+        env = MenageriePandaReach()
         print(f"rolling out {args.episodes} episodes with the {args.policy} policy...")
         data = rollout(env, random_policy, args.episodes, args.seed)
         result = {
             "policy": args.policy,
             "seed": args.seed,
             "task_metrics": task_metrics(data),
-            "exploration_metrics": exploration_metrics(data, reference),
+            "exploration_metrics": exploration_metrics(data, box),
         }
         env.close()
     elif args.command == "losses":
-        result = {"logdir": args.logdir, "world_model_metrics": world_model_metrics(args.logdir)}
+        result = {
+            "logdirs": args.logdirs,
+            "world_model_metrics": world_model_metrics(args.logdirs),
+        }
 
     else:  # "run": every §12.2 metric for one finished training run
-        env = MenageriePandaReach()
-        print(f"building reference workspace from {args.reference_samples} samples...")
-        reference = reference_workspace(env, args.reference_samples, seed=0)
-        print(f"  {len(reference)} reachable voxels at {VOXEL_SIZE} m")
-        env.close()
-
         result = {
             "seed": args.seed,
-            "traj_dir": str(args.traj_dir),
-            "logdir": args.logdir,
+            "traj_dirs": [str(d) for d in args.traj_dirs],
+            "resumed_at": args.resumed_at,
+            "logdirs": args.logdirs,
             "max_steps": args.max_steps,
-            **run_metrics(args.traj_dir, reference, max_steps=args.max_steps),
-            "world_model_metrics": world_model_metrics(args.logdir),
+            **run_metrics(
+                args.traj_dirs,
+                box,
+                max_steps=args.max_steps,
+                resumed_at=args.resumed_at,
+                num_envs=args.num_envs,
+            ),
+            "world_model_metrics": world_model_metrics(args.logdirs),
         }
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
