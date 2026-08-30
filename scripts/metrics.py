@@ -284,7 +284,7 @@ def read_trajectories(
     return ee, episodes
 
 
-def coverage_curve(ee_per_env: list[np.ndarray], reference: set, n_points: int = 50) -> dict:
+def coverage_curve(ee_per_env: list[np.ndarray], box: set, n_points: int = 50) -> dict:
     """C_workspace as a function of total environment steps.
 
     A single end-of-run number cannot distinguish an agent still finding new regions from one that
@@ -312,14 +312,14 @@ def coverage_curve(ee_per_env: list[np.ndarray], reference: set, n_points: int =
         visited: set = set()
         for positions in ee_per_env:
             visited |= voxelize(positions[:m])
-        values.append(len(visited) / max(len(reference | visited), 1))
+        values.append(len(visited & box) / max(len(box), 1))
         steps.append(int(m * n_envs))
     return {"steps": steps, "C_workspace": values}
 
 
 def run_metrics(
     traj_dirs: Path | list[Path],
-    reference: set,
+    box: set,
     max_steps: int | None = None,
     resumed_at: list[int] | None = None,
     num_envs: int | None = None,
@@ -336,8 +336,8 @@ def run_metrics(
     ee, ep = read_trajectories(
         traj_dirs, max_steps=max_steps, resumed_at=resumed_at, num_envs=num_envs
     )
-    exploration = workspace_coverage(ee, reference)
-    exploration["coverage_curve"] = coverage_curve(ee, reference)
+    exploration = workspace_coverage(ee, box)
+    exploration["coverage_curve"] = coverage_curve(ee, box)
 
     out = {
         # Total interactions across all environments, matching TensorBoard's policy_step. ee is a

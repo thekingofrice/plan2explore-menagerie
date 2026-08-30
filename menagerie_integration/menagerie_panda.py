@@ -55,6 +55,21 @@ EE_OFFSET = np.array([0.0, 0.0, 0.1034], dtype=np.float64)
 
 N_ARM_JOINTS = 7  # qpos[:7]; qpos[7:9] are the fingers
 
+#: All hinge/slide joints. Fixes the width of the §13.2 diagnostics row so scripts/metrics.py can
+#: read the stream back, the same contract ee_*.f32 has at 3 columns.
+N_JOINTS = 9
+
+#: §13.2 actuator saturation: |a| above this counts as commanded to the edge of the actuator's
+#: ctrlrange. Applied to the NORMALIZED action, where §8.3's affine map makes one dimensionless
+#: threshold mean the same thing for every actuator regardless of its units.
+SATURATION_THRESHOLD = 0.95
+
+#: §13.2 joint-limit visitation: "at the limit" means within this fraction of the joint's OWN span.
+#: A fraction rather than an absolute keeps one constant correct across hinge joints in radians and
+#: slide joints in metres, and across §16's other arms. MuJoCo's limit constraints are soft by
+#: default, so a joint pressed into its stop sits near the limit rather than exactly on it.
+JOINT_LIMIT_TOL_FRAC = 0.005
+
 
 class MenageriePandaReach(gym.Env):
     """Free-space reaching with the Franka Emika Panda (§8).
