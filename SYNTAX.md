@@ -363,6 +363,33 @@ python scripts/evaluate_task_actor.py \
 | `--seed` | the run's training seed. Recorded only; it does not seed the evaluation |
 | `--eval-seed` | base seed for the evaluation episodes, independent of `--seed`, so every seed and both §14 arms are scored on the same target sequence |
 | `--num-envs` | defaults to the run's own `env.num_envs`, which is what the player's recurrent state was allocated for |
+| `--video-episodes` | record this many episodes of environment 0. Each faces a different target, so `2` gives two videos from one run. `0` (default) renders nothing |
+| `--video-dir` | defaults to a `videos/` folder beside `--out` |
+
+### Video
+
+```bash
+MUJOCO_GL=egl python scripts/evaluate_task_actor.py \
+  --checkpoint "$RUNDIR/version_2/checkpoint/ckpt_500000_0.ckpt" \
+  --episodes 5000 --video-episodes 2 \
+  --seed 1 --out results/summaries/gateC_seed1_eval.json
+```
+
+Only environment 0 renders, and only for the first `--video-episodes` episodes; the other three run
+unrendered, so every §13.1 number still comes from a full-speed rollout. Setting `render_mode` is
+also what makes the wrapper attach a fixed camera and a sphere marking `g` — without them MuJoCo
+falls back to its free camera and the goal has no geometry at all, so the footage shows an arm moving
+toward nothing from an arbitrary angle (`menagerie_integration/render_scene.py`).
+
+Files are named for the target they attempted, e.g. `episode0_target_0.348_0.141_0.245.mp4`. Seeds
+are handed out in order from `--eval-seed`, so a rerun reproduces the same videos.
+
+`MUJOCO_GL=egl` is required — rendering headless needs an offscreen GL context. mp4 needs imageio's
+ffmpeg plugin; without it the script writes a GIF instead and says so.
+
+**Nothing is rendered during training.** Both env configs ship `render_mode: null`, so a training run
+never takes the MjSpec path and never pays for a frame. `capture_video` is a SheepRL `make_env`
+setting and has no effect here — this script instantiates `env.wrapper` directly.
 
 Actions are sampled rather than taken at the mode, matching the frozen implementation's own
 zero-shot evaluation (`test(..., greedy=False)`).

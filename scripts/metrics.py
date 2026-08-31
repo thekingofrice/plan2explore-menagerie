@@ -534,7 +534,7 @@ def run_metrics(
 
 # --------------------------------------------------------------------- §13.3
 
-def world_model_metrics(logdirs: str | list[str]) -> dict:
+def world_model_metrics(logdirs: str | list[str], tags: list[str] | None = None) -> dict:
     """§13.3, read back from the TensorBoard events SheepRL already writes.
 
     Also covers the intrinsic-reward and ensemble-disagreement terms §13.2 asks for, since those are
@@ -572,6 +572,10 @@ def world_model_metrics(logdirs: str | list[str]) -> dict:
         "Loss/value_loss_exploration_intrinsic",
         "Loss/value_loss_exploration_extrinsic",
     ]
+    # p2e_dv3_finetuning declares different keys -- no ensembles, and the task actor's losses are
+    # unsuffixed. scripts/finetuning_metrics.py passes that list rather than duplicating this
+    # function's merge-and-summarize logic.
+    wanted = list(tags) if tags is not None else wanted
 
     series: dict[str, dict[int, float]] = {tag: {} for tag in wanted}
     available: set[str] = set()

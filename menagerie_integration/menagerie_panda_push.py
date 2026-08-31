@@ -33,7 +33,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from render_scene import (  # noqa: E402
     CAMERA_NAME,
-    load_model_with_render_assets,
+    load_model,
+    measure_scene,
     move_target_site,
     target_site_id,
 )
@@ -121,12 +122,20 @@ class MenageriePandaPush(gym.Env):
             raise ValueError(f"unsupported render_mode {render_mode!r}")
         self.render_mode = render_mode
 
-        # A fixed camera and a visible goal marker are attached only when rendering is on, so a
-        # training run never takes the MjSpec path. Both are cosmetic -- see render_scene.py.
-        if render_mode is None:
-            self.model = mujoco.MjModel.from_xml_path(xml_path)
-        else:
-            self.model = load_model_with_render_assets(xml_path)
+        # Measured from a plain compile first, because the base is raised BY the table height and
+        # the MJCF is the only place that height is declared. Raising the base does not move the
+        # table, so these values hold for the real model too.
+        self.cube_half, self.table_top_z = measure_scene(
+            mujoco.MjModel.from_xml_path(xml_path), CUBE_GEOM, TABLE_GEOM
+        )
+        self.cube_rest_z = self.table_top_z + self.cube_half
+
+        # The arm is mounted ON the work surface, as a real tabletop setup is. With the base on the
+        # floor the table sits inside the arm's swept volume: random actions were in contact with it
+        # on 989 of 1000 steps. MJCF cannot express this -- see render_scene.load_model.
+        self.model = load_model(
+            xml_path, base_height=self.table_top_z, render=render_mode is not None
+        )
         self._target_site = target_site_id(self.model)
         self.data = mujoco.MjData(self.model)
 
@@ -181,11 +190,6 @@ class MenageriePandaPush(gym.Env):
         self._cube_qpos_adr = int(self.model.jnt_qposadr[cube_joint_id])
         self._cube_qvel_adr = int(self.model.jnt_dofadr[cube_joint_id])
 
-        # Table height and cube size come from the MJCF, not from constants mirrored here: tuning
-        # the XML without updating a duplicated number would spawn the cube inside the table or
-        # floating above it, and nothing would complain.
-        self.cube_half, self.table_top_z = self._measure_scene()
-        self.cube_rest_z = self.table_top_z + self.cube_half
 
         self._home_key_id = 0 if self.model.nkey > 0 else -1
 
@@ -205,28 +209,6 @@ class MenageriePandaPush(gym.Env):
 
         if seed is not None:
             self.reset(seed=seed)
-
-    def _measure_scene(self) -> tuple[float, float]:
-        """Cube half-extent and table-top height, read off the compiled model.
-
-        Both geoms are boxes, so `geom_size` is the half-extent per axis. A single mj_forward puts
-        world positions in geom_xpos, which handles the table being nested in a body without having
-        to compose body_pos and geom_pos by hand.
-        """
-        cube_gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, CUBE_GEOM)
-        table_gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, TABLE_GEOM)
-        for name, gid in ((CUBE_GEOM, cube_gid), (TABLE_GEOM, table_gid)):
-            if gid < 0:
-                raise ValueError(f"model has no geom named {name!r}")
-            if self.model.geom_type[gid] != mujoco.mjtGeom.mjGEOM_BOX:
-                raise ValueError(f"geom {name!r} must be a box for its half-extent to be read")
-
-        mujoco.mj_resetData(self.model, self.data)
-        mujoco.mj_forward(self.model, self.data)
-
-        cube_half = float(self.model.geom_size[cube_gid][2])
-        table_top = float(self.data.geom_xpos[table_gid][2] + self.model.geom_size[table_gid][2])
-        return cube_half, table_top
 
     # ------------------------------------------------------------------- §13
 

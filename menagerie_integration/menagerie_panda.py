@@ -36,7 +36,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from render_scene import (  # noqa: E402
     CAMERA_NAME,
-    load_model_with_render_assets,
+    load_model,
     move_target_site,
     target_site_id,
 )
@@ -129,10 +129,8 @@ class MenageriePandaReach(gym.Env):
 
         # A fixed camera and a visible goal marker are attached only when rendering is on, so a
         # training run never takes the MjSpec path. Both are cosmetic -- see render_scene.py.
-        if render_mode is None:
-            self.model = mujoco.MjModel.from_xml_path(xml_path)
-        else:
-            self.model = load_model_with_render_assets(xml_path)
+        # Reach has no table, so the base stays on the floor and only render assets are ever added.
+        self.model = load_model(xml_path, render=render_mode is not None)
         self._target_site = target_site_id(self.model)
         self.data = mujoco.MjData(self.model)
 

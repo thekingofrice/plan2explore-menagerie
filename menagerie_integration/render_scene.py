@@ -57,19 +57,47 @@ def _look_at_quat(eye, look_at, up=(0.0, 0.0, 1.0)) -> np.ndarray:
     return quat
 
 
-def load_model_with_render_assets(
+#: Menagerie names the Panda's welded base link0. Elevating it is how Panda Push mounts the arm at
+#: work-surface height, which MJCF cannot express: `<include>` splices at the element level, and an
+#: included robot cannot be wrapped in a repositioned <body> because panda.xml carries <asset> and
+#: <default> blocks that are not legal inside one.
+BASE_BODY = "link0"
+
+
+def load_model(
     xml_path: str,
+    base_height: float = 0.0,
+    render: bool = False,
     camera_eye=DEFAULT_CAMERA_EYE,
     camera_look_at=DEFAULT_CAMERA_LOOK_AT,
     target_radius: float = TARGET_RADIUS,
 ) -> mujoco.MjModel:
-    """Compile `xml_path` with a fixed camera and a goal marker added.
+    """Compile `xml_path`, optionally raising the robot base and adding render assets.
 
-    Loading through MjSpec rather than from_xml_path keeps every relative include resolving from the
-    file's own directory, exactly as a direct load would -- which is what panda_push.xml's
-    `<include file="scene.xml"/>` depends on.
+    Falls through to a plain from_xml_path when neither is asked for, so a task that needs neither
+    never depends on MjSpec at all.
+
+    Loading through MjSpec keeps every relative include resolving from the file's own directory,
+    exactly as a direct load would -- which is what panda_push.xml's `<include file="scene.xml"/>`
+    depends on.
     """
+    if base_height == 0.0 and not render:
+        return mujoco.MjModel.from_xml_path(str(xml_path))
+
     spec = mujoco.MjSpec.from_file(str(xml_path))
+
+    if base_height:
+        try:
+            base = spec.body(BASE_BODY)
+        except (KeyError, ValueError) as exc:
+            names = [b.name for b in spec.bodies]
+            raise ValueError(
+                f"no body named {BASE_BODY!r} to raise; model has {names}"
+            ) from exc
+        base.pos = [base.pos[0], base.pos[1], base.pos[2] + base_height]
+
+    if not render:
+        return spec.compile()
 
     cam = spec.worldbody.add_camera()
     cam.name = CAMERA_NAME
@@ -84,6 +112,34 @@ def load_model_with_render_assets(
     site.pos = list(SITE_PARK)
 
     return spec.compile()
+
+
+def measure_scene(model: mujoco.MjModel, cube_geom: str, table_geom: str) -> tuple[float, float]:
+    """Cube half-extent and table-top height, read off a compiled model.
+
+    Both geoms are boxes, so geom_size holds half-extents per axis. One mj_forward puts world
+    positions in geom_xpos, which handles the table being nested in a body without composing
+    body_pos and geom_pos by hand.
+
+    Lives here rather than on the wrapper because the wrapper needs these values BEFORE it can
+    build its real model -- the base is raised by the table height.
+    """
+    ids = {}
+    for name in (cube_geom, table_geom):
+        gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+        if gid < 0:
+            raise ValueError(f"model has no geom named {name!r}")
+        if model.geom_type[gid] != mujoco.mjtGeom.mjGEOM_BOX:
+            raise ValueError(f"geom {name!r} must be a box for its half-extent to be read")
+        ids[name] = gid
+
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    cube_half = float(model.geom_size[ids[cube_geom]][2])
+    table_top = float(
+        data.geom_xpos[ids[table_geom]][2] + model.geom_size[ids[table_geom]][2]
+    )
+    return cube_half, table_top
 
 
 def target_site_id(model: mujoco.MjModel) -> int:

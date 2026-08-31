@@ -73,7 +73,27 @@ def load_run_config(ckpt_path: Path):
     return raw, dotdict(OmegaConf.to_container(raw, resolve=True))
 
 
-def make_envs(raw_cfg, n: int) -> list:
+def write_video(directory: Path, index: int, frames: list, fps: int, target) -> Path:
+    """Write one episode's frames, naming the file after the target it was attempting.
+
+    mp4 needs imageio's ffmpeg plugin; GIF needs nothing extra. Falling back rather than failing
+    keeps a missing optional dependency from costing the whole evaluation.
+    """
+    import imageio.v2 as imageio
+
+    directory.mkdir(parents=True, exist_ok=True)
+    stem = f"episode{index}_target_{target[0]:.3f}_{target[1]:.3f}_{target[2]:.3f}"
+    path = directory / f"{stem}.mp4"
+    try:
+        imageio.mimwrite(path, frames, fps=fps)
+    except Exception as exc:  # noqa: BLE001 - any writer/plugin failure should degrade, not abort
+        path = directory / f"{stem}.gif"
+        imageio.mimwrite(path, frames, duration=1.0 / fps)
+        print(f"  mp4 writer unavailable ({type(exc).__name__}); wrote {path.name}")
+    return path
+
+
+def make_envs(raw_cfg, n: int, record: bool = False) -> list:
     """Instantiate n copies of the environment the run actually used.
 
     No robot or task is named here. `env.wrapper._target_` and every frozen constant come from the
@@ -86,9 +106,18 @@ def make_envs(raw_cfg, n: int) -> list:
     """
     import hydra
 
+    # Only environment 0 renders, and only when video was asked for. Rendering costs a frame per
+    # step through EGL, so the other three stay off and every §13.1 number comes from the same
+    # rollout at full speed. Setting render_mode also makes the wrapper attach the camera and the
+    # goal marker (render_scene.py), which is what makes the frames readable.
     return [
-        hydra.utils.instantiate(raw_cfg.env.wrapper, trajectory_log=None, _convert_="all")
-        for _ in range(n)
+        hydra.utils.instantiate(
+            raw_cfg.env.wrapper,
+            trajectory_log=None,
+            render_mode="rgb_array" if (record and i == 0) else None,
+            _convert_="all",
+        )
+        for i in range(n)
     ]
 
 
@@ -115,7 +144,16 @@ def build_task_player(fabric, cfg, ckpt_path: Path, env):
 
 
 @torch.no_grad()
-def rollout_task_actor(player, envs, fabric, cfg, episodes: int, seed: int) -> dict:
+def rollout_task_actor(
+    player,
+    envs,
+    fabric,
+    cfg,
+    episodes: int,
+    seed: int,
+    video_episodes: int = 0,
+    video_dir: Path | None = None,
+) -> dict:
     """Run `episodes` episodes under actor_task across `envs`, stepped in lockstep.
 
     Drives the environments directly rather than through a vector wrapper: the player's recurrent
@@ -132,6 +170,13 @@ def rollout_task_actor(player, envs, fabric, cfg, episodes: int, seed: int) -> d
     n = len(envs)
     returns, distances, successes = [], [], []
     ep_return = np.zeros(n)
+
+    # Only environment 0 is recorded, and only its first `video_episodes` episodes. Because seeds
+    # are handed out in order, those are the lowest eval seeds -- so the same two videos come back
+    # on a rerun, and each shows a different target.
+    frames: list = []
+    videos_written = 0
+    fps = int(envs[0].metadata.get("render_fps", 20))
 
     # One distinct seed per episode, handed out in order, so a rerun reproduces the whole evaluation.
     next_seed = seed
@@ -154,7 +199,20 @@ def rollout_task_actor(player, envs, fabric, cfg, episodes: int, seed: int) -> d
             ep_return[i] += float(reward)
             obs_list[i] = o
 
+            recording = i == 0 and videos_written < video_episodes
+            if recording:
+                frames.append(e.render())
+
             if terminated or truncated:
+                if recording and frames:
+                    path = write_video(
+                        video_dir, videos_written, frames, fps, info["target_position"]
+                    )
+                    print(f"  video: {path.name}  ({len(frames)} frames, "
+                          f"success={info['success']}, d={info['distance']:.4f})")
+                    videos_written += 1
+                    frames = []
+
                 returns.append(ep_return[i])
                 distances.append(float(info["distance"]))
                 successes.append(bool(info["success"]))
@@ -219,8 +277,23 @@ def main() -> int:
         default=DEFAULT_EVAL_SEED,
         help="base seed for the evaluation episodes. Like 1, 2, 3, 4, 5, ...",
     )
+    parser.add_argument(
+        "--video-episodes",
+        type=int,
+        default=0,
+        help="record this many episodes of environment 0. Each faces a different target, so 2 gives "
+        "two videos from one run. Rendering is off entirely at 0",
+    )
+    parser.add_argument(
+        "--video-dir",
+        type=Path,
+        default=None,
+        help="where to write them; defaults to a 'videos' folder beside --out",
+    )
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
+
+    video_dir = args.video_dir or args.out.parent / "videos"
 
     from lightning import Fabric
 
@@ -228,8 +301,10 @@ def main() -> int:
     # checkpoint passed belongs to the same run, so they agree by construction.
     raw_cfg, cfg = load_run_config(args.checkpoints[0])
     n_envs = args.num_envs if args.num_envs is not None else int(cfg.env.num_envs)
-    envs = make_envs(raw_cfg, n_envs)
+    envs = make_envs(raw_cfg, n_envs, record=args.video_episodes > 0)
     print(f"{cfg.env.wrapper['_target_']} x{n_envs}")
+    if args.video_episodes:
+        print(f"recording the first {args.video_episodes} episode(s) of env 0 -> {video_dir}")
 
     fabric = Fabric(accelerator=cfg.fabric.get("accelerator", "cpu"), devices=1)
     fabric.launch()
@@ -239,7 +314,10 @@ def main() -> int:
         step = int(m.group(1)) if (m := re.search(r"ckpt_(\d+)_", ckpt.name)) else None
         print(f"evaluating {ckpt.name} ({args.episodes} episodes)...")
         player = build_task_player(fabric, cfg, ckpt, envs[0])
-        result = rollout_task_actor(player, envs, fabric, cfg, args.episodes, args.eval_seed)
+        result = rollout_task_actor(
+            player, envs, fabric, cfg, args.episodes, args.eval_seed,
+            video_episodes=args.video_episodes, video_dir=video_dir,
+        )
         points.append({"policy_step": step, "checkpoint": str(ckpt), **result})
         print(f"  success_rate={result['success_rate']:.3f} "
               f"return_mean={result['return_mean']:.2f} "
