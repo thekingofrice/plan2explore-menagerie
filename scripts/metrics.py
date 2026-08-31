@@ -46,6 +46,22 @@ VOXEL_SIZE = 0.05
 BOX_LOW = (0.30, -0.30, 0.20)
 BOX_HIGH = (0.60, 0.30, 0.60)
 
+#: §13.2 actuator saturation: |a| above this counts as commanded to the edge of the actuator's
+#: range. Applied to the NORMALIZED action, where §8.3's affine map makes one dimensionless
+#: threshold mean the same thing for every actuator whatever its units. Frozen; see
+#: ENVIRONMENT_SPEC.md.
+SATURATION_THRESHOLD = 0.95
+
+#: §13.2 joint-limit visitation: "at the limit" means within this fraction of the joint's OWN span.
+#: A fraction rather than an absolute keeps one constant correct across hinge joints in radians and
+#: slide joints in metres. MuJoCo's limit constraints are soft, so a joint pressed into its stop
+#: sits near the limit rather than exactly on it.
+JOINT_LIMIT_TOL_FRAC = 0.005
+
+#: qpos[:7] are the arm joints. The two finger joints are driven to their extremes every episode by
+#: design, so they are reported individually but kept out of the scalar summary.
+N_ARM_JOINTS = 7
+
 
 # --------------------------------------------------------------------- §13.2
 
@@ -224,12 +240,23 @@ def read_trajectories(
     for d in traj_dirs:
         seg_ee = [_read_rows(p, 3) for p in sorted(d.glob("ee_*.f32"))]
         seg_ep = [_read_rows(p, 4) for p in sorted(d.glob("episodes_*.f32"))]
+        # diag_<ncols>_... -- the row width is model-dependent (nu + njnt), so it travels in the
+        # filename rather than being assumed here. Absent for runs recorded before the stream
+        # existed, which is why nothing downstream requires it.
+        seg_diag = [
+            _read_rows(p, int(p.name.split("_")[1])) for p in sorted(d.glob("diag_*_*.f32"))
+        ]
         if not seg_ee:
             raise FileNotFoundError(f"no ee_*.f32 files in {d}")
-        segments.append([seg_ee, seg_ep])
+        if seg_diag and len(seg_diag) != len(seg_ee):
+            raise ValueError(
+                f"{d} holds {len(seg_ee)} ee_*.f32 but {len(seg_diag)} diag_*.f32; the two streams "
+                "are written by the same environments and must come in matching sets."
+            )
+        segments.append([seg_ee, seg_ep, seg_diag])
 
     n = len(segments[0][0])
-    for d, (seg_ee, _) in zip(traj_dirs, segments):
+    for d, (seg_ee, _, _) in zip(traj_dirs, segments):
         if len(seg_ee) != n:
             raise ValueError(
                 f"segments hold different environment counts: {traj_dirs[0]} has {n} ee_*.f32 "
@@ -250,7 +277,7 @@ def read_trajectories(
         keep = seam_total // n - prev
         if keep <= 0:
             raise ValueError(f"seam {seam_total} is not after the previous seam ({prev * n})")
-        seg_ee, seg_ep = segments[k]
+        seg_ee, seg_ep, seg_diag = segments[k]
         # Writes flush once per episode, so a killed process can leave a file a little short of its
         # own checkpoint. Harmless at this scale, but it is real data loss and should not be silent.
         for p, a in zip(sorted(traj_dirs[k].glob("ee_*.f32")), seg_ee):
@@ -259,14 +286,18 @@ def read_trajectories(
         segments[k] = [
             [a[:keep] for a in seg_ee],
             [rows[rows[:, 0] <= keep] for rows in seg_ep],
+            [a[:keep] for a in seg_diag],
         ]
         prev = seam_total // n
 
     ee_parts: list[list[np.ndarray]] = [[] for _ in range(n)]
+    diag_parts: list[list[np.ndarray]] = [[] for _ in range(n)]
     episode_rows, offset = [], 0
-    for seg_ee, seg_ep in segments:
+    for seg_ee, seg_ep, seg_diag in segments:
         for i, a in enumerate(seg_ee):
             ee_parts[i].append(a)
+        for i, a in enumerate(seg_diag):
+            diag_parts[i].append(a)
         for rows in seg_ep:
             rows = rows.copy()
             rows[:, 0] += offset  # back onto one axis across the seam
@@ -274,14 +305,16 @@ def read_trajectories(
         offset += min(len(a) for a in seg_ee)
 
     ee = [np.concatenate(parts) for parts in ee_parts]
+    diag = [np.concatenate(parts) for parts in diag_parts if parts]
 
     if max_steps is not None:
         per_env = max_steps // n
         ee = [a[:per_env] for a in ee]
+        diag = [a[:per_env] for a in diag]
         episode_rows = [rows[rows[:, 0] <= per_env] for rows in episode_rows]
 
     episodes = np.concatenate(episode_rows) if episode_rows else np.empty((0, 4), np.float32)
-    return ee, episodes
+    return ee, episodes, diag
 
 
 def coverage_curve(ee_per_env: list[np.ndarray], box: set, n_points: int = 50) -> dict:
@@ -317,12 +350,139 @@ def coverage_curve(ee_per_env: list[np.ndarray], box: set, n_points: int = 50) -
     return {"steps": steps, "C_workspace": values}
 
 
+def _marks(per_env_len: int, n_points: int) -> np.ndarray:
+    """Prefix lengths at which a curve is sampled, shared with coverage_curve's x-axis."""
+    if per_env_len == 0:
+        return np.empty(0, dtype=int)
+    return np.unique(
+        np.linspace(max(per_env_len // n_points, 1), per_env_len, n_points).astype(int)
+    )
+
+
+def _prefix_curve(per_env: list[np.ndarray], marks: np.ndarray) -> list[float]:
+    """Mean over environments and over the first m steps, for each mark m.
+
+    A prefix mean rather than a windowed one, so the last point equals the headline metric exactly,
+    matching coverage_curve. It damps late changes; read the headline against an early mark to see
+    whether the policy drifted.
+    """
+    cums = [np.cumsum(a, axis=0) for a in per_env]
+    return [float(np.mean([c[m - 1] / m for c in cums], axis=0)) for m in marks]
+
+
+def saturation_metrics(actions_per_env: list[np.ndarray], n_points: int = 50) -> dict:
+    """§13.2 actuator saturation, from NORMALIZED actions -- one array per environment, (T, nu).
+
+    Clipping to [-1, 1] mirrors what _denormalize_action feeds the simulator, so this describes the
+    action that was executed rather than the one the policy asked for. ``action_magnitude_mean`` is
+    the threshold-free companion: it answers "how much of the action range is in use" without
+    depending on SATURATION_THRESHOLD being the right cutoff.
+    """
+    mag = [np.abs(np.asarray(a, dtype=np.float64).reshape(len(a), -1)).clip(max=1.0)
+           for a in actions_per_env]
+    sat = [(m > SATURATION_THRESHOLD).mean(axis=-1) for m in mag]
+    mean_mag = [m.mean(axis=-1) for m in mag]
+
+    n_envs = len(mag)
+    marks = _marks(min((len(m) for m in mag), default=0), n_points)
+    return {
+        "actuator_saturation_fraction": float(np.mean([s.mean() for s in sat])),
+        "action_magnitude_mean": float(np.mean([m.mean() for m in mean_mag])),
+        "saturation_threshold": SATURATION_THRESHOLD,
+        "saturation_curve": {
+            "steps": [int(m * n_envs) for m in marks],
+            "fraction": _prefix_curve(sat, marks),
+        },
+    }
+
+
+def joint_limit_metrics(
+    qpos_per_env: list[np.ndarray],
+    jnt_range: np.ndarray,
+    jnt_limited: np.ndarray,
+    n_points: int = 50,
+) -> dict:
+    """§13.2 joint-limit visitation -- one qpos array per environment, (T, njnt).
+
+    Per joint, the fraction of steps within JOINT_LIMIT_TOL_FRAC of that joint's own span from
+    either end of jnt_range. Unlimited joints report 0.0. The scalar summary covers the arm joints
+    only; the fingers sit at their stops every episode by design and would dominate it.
+
+    Valid only when every joint contributes one qpos entry -- true for a serial arm, false once §15
+    adds a free-floating cube (7 qpos, 1 joint). The caller must check nq == njnt.
+    """
+    lo, hi = np.asarray(jnt_range)[:, 0], np.asarray(jnt_range)[:, 1]
+    limited = np.asarray(jnt_limited).astype(bool)
+    tol = JOINT_LIMIT_TOL_FRAC * (hi - lo)
+
+    near = []
+    for q in qpos_per_env:
+        q = np.asarray(q, dtype=np.float64).reshape(len(q), -1)
+        near.append(((np.abs(q - lo) <= tol) | (np.abs(q - hi) <= tol)) & limited)
+
+    per_joint = np.mean([n.mean(axis=0) for n in near], axis=0)
+    arm = [n[:, :N_ARM_JOINTS].mean(axis=-1) for n in near]
+
+    n_envs = len(near)
+    marks = _marks(min((len(n) for n in near), default=0), n_points)
+    return {
+        "joint_limit_visitation": [round(float(v), 6) for v in per_joint],
+        "joint_limit_visitation_arm_mean": float(per_joint[:N_ARM_JOINTS].mean()),
+        "joint_limit_tol_frac": JOINT_LIMIT_TOL_FRAC,
+        "joint_limit_curve": {
+            "steps": [int(m * n_envs) for m in marks],
+            "arm_mean": _prefix_curve(arm, marks),
+        },
+    }
+
+
+def _diagnostics_metrics(diag: list[np.ndarray], checkpoint: Path | None) -> dict:
+    """§13.2 saturation and joint-limit visitation, from the stream or from a replay buffer.
+
+    Returns the reason it found neither rather than raising, so a run recorded before the stream
+    existed still yields its coverage and task metrics.
+    """
+    # Imported here: both paths need MuJoCo for jnt_range, and the buffer path needs torch and an
+    # importable sheeprl. Neither is required to read the .f32 streams.
+    if not diag and checkpoint is None:
+        return {
+            "diagnostics_source": None,
+            "diagnostics_note": "no diag_*.f32 stream; pass --checkpoint to read the replay buffer",
+        }
+
+    from buffer_metrics import joint_limits_from_model
+
+    jnt_range, jnt_limited = joint_limits_from_model()
+    njnt = len(jnt_range)
+
+    if diag:
+        # Row layout is [action(nu), qpos(njnt)]; nu varies by model, njnt anchors the split.
+        actions = [d[:, :-njnt] for d in diag]
+        qpos = [d[:, -njnt:] for d in diag]
+        source, steps = "trajectory_log", int(sum(len(d) for d in diag))
+    else:
+        from buffer_metrics import read_buffer
+
+        qpos, actions, lengths = read_buffer(Path(checkpoint))
+        source, steps = "replay_buffer", int(sum(lengths))
+
+    return {
+        "diagnostics_source": source,
+        # Records separately from steps_recorded: the buffer can hold a few thousand steps past the
+        # checkpoint it was saved with, so the two need not agree.
+        "diagnostics_steps": steps,
+        **saturation_metrics(actions),
+        **joint_limit_metrics(qpos, jnt_range, jnt_limited),
+    }
+
+
 def run_metrics(
     traj_dirs: Path | list[Path],
     box: set,
     max_steps: int | None = None,
     resumed_at: list[int] | None = None,
     num_envs: int | None = None,
+    checkpoint: Path | None = None,
 ) -> dict:
     """§13.1 and §13.2 from a completed run's recorded trajectory.
 
@@ -331,13 +491,16 @@ def run_metrics(
     against a checkpoint. Coverage is unambiguous: it is exactly the set of positions visited while
     exploring, which is what §13.2 asks for.
 
-    ``traj_dirs``, ``resumed_at`` and ``max_steps`` are described in read_trajectories.
+    Saturation and joint-limit visitation come from the diag_*.f32 stream when the run recorded one,
+    and otherwise from ``checkpoint``'s replay buffer, which holds the same quantities for runs that
+    predate it. ``traj_dirs``, ``resumed_at`` and ``max_steps`` are described in read_trajectories.
     """
-    ee, ep = read_trajectories(
+    ee, ep, diag = read_trajectories(
         traj_dirs, max_steps=max_steps, resumed_at=resumed_at, num_envs=num_envs
     )
     exploration = workspace_coverage(ee, box)
     exploration["coverage_curve"] = coverage_curve(ee, box)
+    exploration.update(_diagnostics_metrics(diag, checkpoint))
 
     out = {
         # Total interactions across all environments, matching TensorBoard's policy_step. ee is a
@@ -494,6 +657,14 @@ def main() -> int:
     )
     p_run.add_argument("--seed", type=int, required=True)
     p_run.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help="a ckpt_*.ckpt whose replay buffer supplies §13.2's saturation and joint-limit "
+        "visitation. Only for runs recorded before the diag_*.f32 stream existed; when the stream "
+        "is present it is used instead and this is ignored",
+    )
+    p_run.add_argument(
         "--max-steps",
         type=int,
         default=None,
@@ -541,6 +712,7 @@ def main() -> int:
                 max_steps=args.max_steps,
                 resumed_at=args.resumed_at,
                 num_envs=args.num_envs,
+                checkpoint=args.checkpoint,
             ),
             "world_model_metrics": world_model_metrics(args.logdirs),
         }

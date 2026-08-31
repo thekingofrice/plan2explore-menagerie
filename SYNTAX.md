@@ -215,17 +215,46 @@ inflated coverage number, with no error.
 
 ## 7. Random baseline (§14)
 
+The same pipeline as §5 at the same budget and seeds — the acting policy is the only difference. The
+script takes no flags of its own: every argument is forwarded to Hydra, so paste the §5 command and
+change only the two lines marked below.
+
 ```bash
 cd "$REPO"
 for SEED in 0 1 2 3 4; do
-  python scripts/random_baseline.py --steps 500000 --seed $SEED \
-    --traj-dir "$REPO/results/runs/random_seed${SEED}/trajectories"
+  MUJOCO_GL=egl PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  python scripts/random_baseline.py \
+    exp=p2e_dv3_exploration \
+    env=menagerie_panda_reach \
+    env.num_envs=4 \
+    root_dir=random_baseline/MenageriePandaReach \
+    env.wrapper.trajectory_log="$REPO/results/runs/random_seed${SEED}/trajectories" \
+    algo.cnn_keys.encoder=[] algo.cnn_keys.decoder=[] \
+    algo.mlp_keys.encoder=[state] algo.mlp_keys.decoder=[state] \
+    algo.dense_units=512 algo.mlp_layers=2 \
+    algo.world_model.recurrent_model.recurrent_state_size=512 \
+    algo.world_model.transition_model.hidden_size=512 \
+    algo.world_model.representation_model.hidden_size=512 \
+    algo.total_steps=500000 \
+    algo.run_test=False \
+    metric.log_every=1000 \
+    checkpoint.every=10000 \
+    fabric.accelerator=gpu fabric.devices=1 \
+    seed=$SEED
 done
 ```
 
-CPU-only — no GPU, no world model — so it can run alongside a training job. `--steps` must match the
-training budget being compared against, and seeds must match, per §14's "same number of environment
-interactions ... and seeds where appropriate."
+| Differs from §5 | Why |
+|---|---|
+| `scripts/random_baseline.py` instead of `sheeprl.py` | patches `PlayerDV3.get_actions` to return `a_t ~ U([-1,1]^m)`, then hands everything to SheepRL. `sheeprl/algos/` is untouched on disk, so §3 holds |
+| `root_dir=random_baseline/...` | **required.** Every other key is shared, so the default run name is identical in form to a training run's and the two arms would interleave in one log directory, told apart only by timestamp |
+
+This is a full GPU training run, not a CPU stepping loop: world model, ensembles and both
+actor-critics all train on the randomly-collected data. That is what makes §14's comparison about the
+acting policy rather than about which arm had a world model, and it gives the baseline its own §13.3
+losses and its own `Rewards/intrinsic_intrinsic`. Budget for it as a second run per seed.
+
+Resuming a baseline works exactly as §6b describes — it is an ordinary SheepRL run.
 
 ## 8. Metrics (§13)
 
@@ -241,19 +270,56 @@ python scripts/metrics.py run \
   --out results/summaries/gateB_seed0.json
 ```
 
-Per baseline run (no `--logdir`: a random policy has no world model or TensorBoard events):
+The §14 baseline is a full training run, so it has TensorBoard events and is read with the same
+command — point `--traj-dir` and `--logdir` at that seed's `random_baseline/...` run.
 
-```bash
-python scripts/baseline_metrics.py \
-  --traj-dir results/runs/random_seed0/trajectories \
-  --seed 0 --out results/summaries/random_seed0.json
-```
+A resumed run leaves one trajectory directory and one `version_N` per segment. Pass them oldest
+first, with the step count from each checkpoint resumed at:
 
-`--reference-samples` (default 200000) builds `C_workspace`'s denominator by sampling joint
-configurations. **Use the same value for every run you compare**, or the coverage ratios differ for
-reasons unrelated to the policy. Lower it to 20000 for a quick check only.
+    --traj-dir <segment 0> --traj-dir <segment 1> --resumed-at <ckpt step> --num-envs 4
+    --logdir <version_0>   --logdir <version_1>
+
+`--num-envs` is checked against the file count in each segment. That is what catches two segments
+sharing a directory, which otherwise reads N files as N environments and corrupts `coverage_curve`
+without erroring.
+
+`--checkpoint` reads §13.2's actuator saturation and joint-limit visitation out of a checkpoint's
+replay buffer. Only for runs recorded before the `diag_*.f32` stream existed; when the stream is
+present it is used instead and the flag is ignored.
 
 `--max-steps` is a one-off for a run whose budget was set wrong; omit it normally.
+
+`C_workspace`'s denominator is the §8.1 box divided into `VOXEL_SIZE` cubes — enumerated, not
+sampled, so it is identical for every run and needs no flag.
+
+## 9. Task-actor evaluation (§13.1)
+
+`metrics.py` reports the **exploration** actor's task numbers, since that actor collects the data.
+§13.1's evaluation episodes need the **task** actor, which is trained in imagination and never acts
+during training:
+
+```bash
+python scripts/evaluate_task_actor.py \
+  --checkpoint "$RUN/checkpoint/ckpt_500000_0.ckpt" \
+  --episodes 5000 \
+  --seed 0 \
+  --out results/summaries/gateC_seed0_eval.json
+```
+
+| Flag | Why |
+|---|---|
+| `--checkpoint` | repeatable; each is evaluated separately and reported as its own point |
+| `--episodes` | total across all environments, **not** per environment. Every episode runs `max_episode_steps`, so 5,000 episodes is 500,000 environment steps — size it against the success rate's standard error, `sqrt(p(1-p)/n)` |
+| `--seed` | the run's training seed. Recorded only; it does not seed the evaluation |
+| `--eval-seed` | base seed for the evaluation episodes, independent of `--seed`, so every seed and both §14 arms are scored on the same target sequence |
+| `--num-envs` | defaults to the run's own `env.num_envs`, which is what the player's recurrent state was allocated for |
+
+Actions are sampled rather than taken at the mode, matching the frozen implementation's own
+zero-shot evaluation (`test(..., greedy=False)`).
+
+The robot, the task and every frozen constant are instantiated from the checkpoint's `config.yaml`,
+so no flag names a robot and §15/§16 need no change here. This requires step 3's symlink to be
+installed, because `env.wrapper._target_` resolves through `sheeprl.envs`.
 
 Live monitoring:
 
@@ -266,31 +332,44 @@ tensorboard --logdir logs/runs/p2e_dv3_exploration --port 6007
 
 ## Where the numbers come from
 
-| §12.2 metric | Source |
+| §13 metric | Source |
 |---|---|
-| task success, task return | `episodes_*.f32` → `metrics.py` |
-| end-effector workspace coverage | `ee_*.f32` → `metrics.py` |
-| intrinsic reward | TensorBoard `Rewards/intrinsic` |
+| task success / return / distance, **exploration** actor | `episodes_*.f32` → `metrics.py run` |
+| task success / return / distance, **task** actor (§13.1) | checkpoint → `evaluate_task_actor.py` |
+| end-effector workspace coverage + curve | `ee_*.f32` → `metrics.py run` |
+| actuator saturation, joint-limit visitation | `diag_*.f32` → `metrics.py run`; or `--checkpoint` for runs predating that stream |
+| intrinsic reward | TensorBoard `Rewards/intrinsic_intrinsic` |
 | ensemble disagreement | **the same tag** — in Plan2Explore the intrinsic reward *is* the variance across ensemble predictions, and `intrinsic_reward_multiplier` is 1. One number, not two |
 | world-model losses | `Loss/world_model_loss`, `Loss/observation_loss`, `Loss/reward_loss`, `State/kl`, `Loss/ensemble_loss` |
 
-Task success and return come from the **exploration** actor, which is what drives data collection.
-They are not an evaluation of the task actor; that needs `sheeprl_eval.py` against a checkpoint.
+The tag is `Rewards/intrinsic_intrinsic`, not `Rewards/intrinsic`: the algorithm copies the generic
+aggregator key into one per exploration critic (`f"Rewards/intrinsic_{k}"`) and deletes the generic
+one, and the intrinsic critic's key is itself `intrinsic`. Not a typo.
+
+`metrics.py`'s task numbers come from the **exploration** actor, which drives data collection. They
+are not an evaluation of the task actor; that is §9's job.
 
 ## Trajectory file format
 
 ```
-ee_<pid>_<id>.f32         3 float32 per environment step   x, y, z of the end effector
-episodes_<pid>_<id>.f32   4 float32 per episode            per-env step count, return,
-                                                           final distance, success
+ee_<pid>_<id>.f32            3 float32 per environment step   x, y, z of the end effector
+episodes_<pid>_<id>.f32      4 float32 per episode            per-env step count, return,
+                                                              final distance, success
+diag_<ncols>_<pid>_<id>.f32  ncols float32 per step           normalized action (nu),
+                                                              then qpos (njnt)
 ```
 
-One pair per environment process. Read back with:
+One set per environment process. Read back with:
 
 ```python
-ee = np.fromfile(path, dtype=np.float32).reshape(-1, 3)
-ep = np.fromfile(path, dtype=np.float32).reshape(-1, 4)
+ee   = np.fromfile(path, dtype=np.float32).reshape(-1, 3)
+ep   = np.fromfile(path, dtype=np.float32).reshape(-1, 4)
+diag = np.fromfile(path, dtype=np.float32).reshape(-1, ncols)   # ncols is in the filename
 ```
+
+`diag` stores the raw action and joint positions rather than derived flags, so §13.2's
+`SATURATION_THRESHOLD` and `JOINT_LIMIT_TOL_FRAC` can be changed and reapplied without re-running.
+Its width is `nu + njnt`, which differs per robot, so it travels in the filename.
 
 Raw streams rather than `.npy` because they are appended to across a multi-hour run and must survive
 an abrupt kill — there is no header to finalize. Files are created on the first *step*, so an
@@ -318,6 +397,11 @@ regardless. Sequences are always drawn from within a single environment.
 (core dumped)` and was never reproduced. A native crash gives no Python traceback. If a long run dies
 silently, check this before suspecting SheepRL. See `ENVIRONMENT_SPEC.md` §10.
 
-**Three §13.2 metrics are not recorded** — actuator saturation fraction, joint-limit visitation, and
-state-space coverage. The trajectory files hold only end-effector positions, so these cannot be
-computed after a run. `C_workspace`, the metric §14's comparison rests on, is unaffected.
+**Runs recorded before the `diag_*.f32` stream** have no actuator saturation or joint-limit
+visitation in their trajectory files. Recover both from the replay buffer with `metrics.py run
+--checkpoint <ckpt>`; that works only while `full` is False on the buffer, i.e. while
+`algo.total_steps < buffer.size`.
+
+**`torch.load` needs `weights_only=False` to resume.** torch 2.6 flipped the default, and the
+checkpoint holds a pickled `EnvIndependentReplayBuffer`. `scripts/resume.py` patches it; launching a
+resume through `sheeprl.py` directly fails with `UnpicklingError`.

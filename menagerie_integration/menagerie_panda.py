@@ -174,6 +174,16 @@ class MenageriePandaReach(gym.Env):
         self._traj_dir = Path(trajectory_log) if trajectory_log else None
         self._ee_file = None
         self._episode_file = None
+        self._diag_file = None
+
+        # §13.2's joint-limit visitation indexes jnt_range alongside qpos, which is only valid when
+        # every joint contributes exactly one qpos entry. True for a serial arm; false once §15 adds
+        # a free-floating cube (7 qpos, 1 joint). Fail at construction rather than mis-pair silently.
+        if self.model.nq != self.model.njnt:
+            raise ValueError(
+                f"nq={self.model.nq} != njnt={self.model.njnt}: some joint does not contribute one "
+                "qpos entry, so the §13.2 diagnostics row cannot be read back per joint."
+            )
 
         # Renderer is lazy: it needs a GL context, and the env must import and step without one.
         self.render_height = int(render_height)
@@ -192,8 +202,13 @@ class MenageriePandaReach(gym.Env):
         otherwise computed every step and discarded. §13.2's C_workspace needs the positions visited
         *while exploring*, which cannot be reconstructed from a checkpoint afterwards.
 
-            ee_<pid>_<id>.f32        3 floats/step      x, y, z
-            episodes_<pid>_<id>.f32  4 floats/episode   total_steps, return, final_distance, success
+            ee_<pid>_<id>.f32           3 floats/step      x, y, z
+            episodes_<pid>_<id>.f32     4 floats/episode   total_steps, return, final_distance, success
+            diag_<ncols>_<pid>_<id>.f32 ncols floats/step  normalized action (nu), then qpos (njnt)
+
+        The diagnostics row carries the raw quantities, not the derived flags, so §13.2's saturation
+        threshold and joint-limit tolerance can be changed without re-running. Its width is in the
+        filename because it is model-dependent -- §16's other arms have a different nu and njnt.
 
         Read back with np.fromfile(...).reshape(-1, 3) and (-1, 4). Raw streams rather than .npy
         because both are appended to across a multi-hour run and must survive an abrupt kill: there
@@ -208,6 +223,8 @@ class MenageriePandaReach(gym.Env):
         tag = f"{os.getpid()}_{id(self):x}"
         self._ee_file = open(self._traj_dir / f"ee_{tag}.f32", "ab")
         self._episode_file = open(self._traj_dir / f"episodes_{tag}.f32", "ab")
+        ncols = self.model.nu + self.model.njnt
+        self._diag_file = open(self._traj_dir / f"diag_{ncols}_{tag}.f32", "ab")
 
     def _record_episode(self) -> None:
         """Append the finished episode's outcome.
@@ -231,6 +248,7 @@ class MenageriePandaReach(gym.Env):
         )
         self._episode_file.flush()
         self._ee_file.flush()
+        self._diag_file.flush()
 
     # ------------------------------------------------------------------ §8.3
 
@@ -273,8 +291,7 @@ class MenageriePandaReach(gym.Env):
         seeds: r(0.017)=0.997, r(0.27 median)=0.478, r(0.50)=0.082, so the reward spans its full
         range across the distances the task actually produces.
 
-        Exists only so the task actor can be evaluated. The exploration actor optimizes
-        Plan2Explore's intrinsic objective and never sees it.
+        Exists only so the task actor can be evaluated.
         """
         d = self._distance()
         return float(np.exp(-self.alpha * d * d))
@@ -376,6 +393,15 @@ class MenageriePandaReach(gym.Env):
             if self._ee_file is None:
                 self._open_trajectory_files()
             self._ee_file.write(self._ee_position().astype(np.float32).tobytes())
+            # The action as executed -- clipped exactly as _denormalize_action clips it -- followed
+            # by the resulting qpos. Raw, so §13.2's threshold and tolerance stay changeable.
+            self._diag_file.write(
+                np.concatenate(
+                    [np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0), self.data.qpos]
+                )
+                .astype(np.float32)
+                .tobytes()
+            )
 
         return obs, reward, False, self.steps >= self.max_episode_steps, self._info()
 
@@ -410,7 +436,7 @@ class MenageriePandaReach(gym.Env):
         if self._episode_file is not None and self.steps > 0:
             self._record_episode()
 
-        for attr in ("_ee_file", "_episode_file"):
+        for attr in ("_ee_file", "_episode_file", "_diag_file"):
             handle = getattr(self, attr, None)
             if handle is not None:
                 handle.flush()
