@@ -259,9 +259,9 @@ Resume, metrics and evaluation are identical to Reach's §6b, §8 and §9 — no
 names a task. `metrics.py run` reads Push's `diag_*.f32` with no extra flags, because the row stays
 17 columns wide (`nu + 9`) and the reader splits on `nu`.
 
-**`beta` is not frozen.** `ENVIRONMENT_SPEC.md` §13 records that `beta=10` compresses the reward into
-its top 60 % for Push's distance distribution, and that `beta=30` matches what `alpha=10` does for
-Reach. Freeze a value and record it before launching a real Push run.
+`beta` is **30.0**, frozen 2026-08-31 — not Reach's 10. Push's distances are half Reach's and enter
+squared, so `alpha=10` would compress the reward into its top 60 %. `ENVIRONMENT_SPEC.md` §13 carries
+the measurement.
 
 ## 7. Random baseline (§14)
 

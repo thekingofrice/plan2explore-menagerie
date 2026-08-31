@@ -82,6 +82,9 @@ log "Phase 5 Option A: installing the environment wrapper into the SheepRL check
 link_file "${SRC_DIR}/menagerie_panda.py" "${ENV_DEST}"
 link_file "${SRC_DIR}/menagerie_panda_reach.yaml" "${CFG_DEST}"
 
+# render_scene.py needs no link of its own: both wrappers reach it through
+# Path(__file__).resolve().parent, which follows their symlinks back to menagerie_integration/.
+
 link_file "${SRC_DIR}/menagerie_panda_push.py" "${PUSH_ENV_DEST}"
 link_file "${SRC_DIR}/menagerie_panda_push.yaml" "${PUSH_CFG_DEST}"
 link_file "${TASKS_DIR}/panda_push.xml" "${PUSH_XML_DEST}"

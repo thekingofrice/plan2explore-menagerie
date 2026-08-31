@@ -36,10 +36,9 @@ wrapper:
   control_dt: 0.05
   max_episode_steps: 200
 
-  # §15 task. beta is NOT yet frozen: alpha=10 for Reach was chosen only after measuring the
-  # start-state distribution over 2000 seeds. beta needs the same treatment against the
-  # cube-to-goal distribution before any Push training is launched.
-  beta: 10.0
+  # §15 task. beta frozen 2026-08-31 against the measured cube-to-goal distribution; see
+  # ENVIRONMENT_SPEC.md §13. Reach's alpha=10 does not transfer.
+  beta: 30.0
   success_tol: 0.05
 
   # Planar target region on the table top (§15). Two values, not three: z is pinned to the cube's

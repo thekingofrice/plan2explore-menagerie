@@ -29,6 +29,18 @@ import mujoco
 import numpy as np
 from gymnasium import spaces
 
+import sys
+
+# Path.resolve() follows the §11.1 symlink back to menagerie_integration/, so this import works both
+# from here and from sheeprl/envs/ where this file is linked -- the same mechanism DEFAULT_XML uses.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from render_scene import (  # noqa: E402
+    CAMERA_NAME,
+    load_model_with_render_assets,
+    move_target_site,
+    target_site_id,
+)
+
 # --- §8 frozen constants (source of truth: ENVIRONMENT_SPEC.md) -------------
 
 #: Resolved from this file's location, not the working directory: Path.resolve() follows the §11.1
@@ -115,7 +127,13 @@ class MenageriePandaReach(gym.Env):
             raise ValueError(f"unsupported render_mode {render_mode!r}")
         self.render_mode = render_mode
 
-        self.model = mujoco.MjModel.from_xml_path(xml_path)
+        # A fixed camera and a visible goal marker are attached only when rendering is on, so a
+        # training run never takes the MjSpec path. Both are cosmetic -- see render_scene.py.
+        if render_mode is None:
+            self.model = mujoco.MjModel.from_xml_path(xml_path)
+        else:
+            self.model = load_model_with_render_assets(xml_path)
+        self._target_site = target_site_id(self.model)
         self.data = mujoco.MjData(self.model)
 
         # §8.4 control interval
@@ -362,6 +380,7 @@ class MenageriePandaReach(gym.Env):
         mujoco.mj_resetData(self.model, self.data)
         self._reset_model()
         self.target = self._sample_target()
+        move_target_site(self.model, self._target_site, self.target)
         self.steps = 0
         self._episode_return = 0.0
 
@@ -424,7 +443,9 @@ class MenageriePandaReach(gym.Env):
             self._renderer = mujoco.Renderer(
                 self.model, height=self.render_height, width=self.render_width
             )
-        self._renderer.update_scene(self.data)
+        # Named camera rather than MuJoCo's free camera, which points wherever it defaults to and
+        # not at the workspace. render_scene.py attaches it when render_mode is set.
+        self._renderer.update_scene(self.data, camera=CAMERA_NAME)
         return self._renderer.render()
 
     def close(self) -> None:

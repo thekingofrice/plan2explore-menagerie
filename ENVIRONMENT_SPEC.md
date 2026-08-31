@@ -316,7 +316,7 @@ at the cube's resting height. With `p_cube(s_t)` the cube's centre:
 | target `z` | `0.245` | derived: table top `0.22` + cube half-extent `0.025` |
 | `cube_init_xy` | `(0.45, 0.0)` | |
 | `cube_jitter` | `U(-0.03, +0.03)` m on x and y | |
-| `beta` | `10.0` | **NOT frozen** - see the measurement below |
+| `beta` | `30.0` | **frozen 2026-08-31**, per the measurement below |
 | `success_tol` (`epsilon`) | `0.05` | 5 cm, as Reach |
 
 The distance is cube-to-goal, not end-effector-to-goal. That single change is the substance of §15:
@@ -340,7 +340,7 @@ about 6 % on §13.1's success rate, because the cube starts near the centre of a
 measures it directly. It is a property of the geometry, not of `beta`: widening the target region,
 shrinking `cube_jitter`, or excluding a disc around the cube's start would each reduce it.
 
-### `beta` is not yet frozen
+### `beta = 30` is frozen, and Reach's `alpha = 10` does not transfer
 
 `alpha = 10` was chosen for Reach only after confirming the reward spanned its range across the
 distances that task produces. Carrying the same constant to Push does **not** hold, because Push's
@@ -355,8 +355,11 @@ distances are roughly half Reach's and distance enters squared:
 
 At `beta = 10` the reward is compressed into its top 60 %: an untouched cube already scores 0.81 at
 the median start. `beta = 30` reproduces `alpha = 10`'s character for this distribution almost
-exactly. The code still ships `10.0`; **freeze a value and record it here before any Push training
-begins**, exactly as §2 did for `alpha`.
+exactly, and is what the code and the YAML now carry.
+
+The wrapper's own sampling was checked against this model over 2000 seeds: median `d_0` 0.1441 m
+against the analytic 0.1463, and a 6.70 % floor against 6.05 % — within one standard error of a 6 %
+proportion at that sample size (±0.53 %).
 
 ## 14. Observation (§15)
 

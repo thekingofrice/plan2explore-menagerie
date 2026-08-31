@@ -26,6 +26,18 @@ import mujoco
 import numpy as np
 from gymnasium import spaces
 
+import sys
+
+# Path.resolve() follows the §11.1 symlink back to menagerie_integration/, so this import works both
+# from here and from sheeprl/envs/ where this file is linked -- the same mechanism DEFAULT_XML uses.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from render_scene import (  # noqa: E402
+    CAMERA_NAME,
+    load_model_with_render_assets,
+    move_target_site,
+    target_site_id,
+)
+
 # --- §15 constants (source of truth: ENVIRONMENT_SPEC.md) -------------------
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -43,10 +55,11 @@ DEFAULT_CONTROL_DT = 0.05
 #: where reaching needs only approach.
 DEFAULT_MAX_EPISODE_STEPS = 200
 
-#: NOT YET FROZEN. alpha=10 for Reach was chosen only after measuring the start-state distribution
-#: over 2000 seeds and confirming the reward spanned its range. beta needs the same treatment against
-#: the cube-to-goal distribution before any Push training begins.
-DEFAULT_BETA = 10.0
+#: FROZEN 2026-08-31, confirmed against the measured cube-to-goal distribution over 2000 seeds:
+#: r(0.006)=0.999, r(0.146 median)=0.526, r(0.304)=0.063. The reward spans its full range across the
+#: distances this task produces. Reach's alpha=10 does NOT transfer -- Push's distances are half
+#: Reach's and enter squared, which left the reward compressed into its top 60%.
+DEFAULT_BETA = 30.0
 
 DEFAULT_SUCCESS_TOL = 0.05
 
@@ -108,7 +121,13 @@ class MenageriePandaPush(gym.Env):
             raise ValueError(f"unsupported render_mode {render_mode!r}")
         self.render_mode = render_mode
 
-        self.model = mujoco.MjModel.from_xml_path(xml_path)
+        # A fixed camera and a visible goal marker are attached only when rendering is on, so a
+        # training run never takes the MjSpec path. Both are cosmetic -- see render_scene.py.
+        if render_mode is None:
+            self.model = mujoco.MjModel.from_xml_path(xml_path)
+        else:
+            self.model = load_model_with_render_assets(xml_path)
+        self._target_site = target_site_id(self.model)
         self.data = mujoco.MjData(self.model)
 
         self.control_dt = float(control_dt)
@@ -338,6 +357,7 @@ class MenageriePandaPush(gym.Env):
         mujoco.mj_resetData(self.model, self.data)
         self._reset_model()
         self.target = self._sample_target()
+        move_target_site(self.model, self._target_site, self.target)
         self.steps = 0
         self._episode_return = 0.0
 
@@ -397,7 +417,9 @@ class MenageriePandaPush(gym.Env):
             self._renderer = mujoco.Renderer(
                 self.model, height=self.render_height, width=self.render_width
             )
-        self._renderer.update_scene(self.data)
+        # Named camera rather than MuJoCo's free camera, which points wherever it defaults to and
+        # not at the workspace. render_scene.py attaches it when render_mode is set.
+        self._renderer.update_scene(self.data, camera=CAMERA_NAME)
         return self._renderer.render()
 
     def close(self) -> None:
