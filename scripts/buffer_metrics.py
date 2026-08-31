@@ -70,8 +70,12 @@ def read_buffer(ckpt_path: Path) -> tuple[list[np.ndarray], list[np.ndarray], li
     return qpos, actions, lengths
 
 
-def joint_limits_from_model() -> tuple[np.ndarray, np.ndarray]:
-    """jnt_range and jnt_limited from the frozen MJCF, with the one-qpos-entry-per-joint check.
+def joint_limits_from_model() -> tuple[np.ndarray, np.ndarray, int]:
+    """jnt_range, jnt_limited and nu from the frozen MJCF.
+
+    `nu` is returned because it is what splits a diag_*.f32 row: the row is [action(nu), qpos(...)],
+    and `nu` is stable per robot while the joint count is not -- §15's free-floating cube adds a
+    joint that carries no limits and is not logged.
 
     Imported lazily by scripts/metrics.py, which otherwise needs no MuJoCo.
     """
@@ -79,14 +83,7 @@ def joint_limits_from_model() -> tuple[np.ndarray, np.ndarray]:
 
     env = MenageriePandaReach()
     try:
-        if env.model.nq != env.model.njnt:
-            raise RuntimeError(
-                f"nq={env.model.nq} != njnt={env.model.njnt}: some joint does not contribute "
-                "exactly one qpos entry, so state[:9] is not a per-joint position vector and "
-                "jnt_range cannot be indexed alongside it. Expected once §15 adds a free-floating "
-                "cube (7 qpos, 1 joint); joint_limit_metrics needs a qpos-address map first."
-            )
-        return env.model.jnt_range.copy(), env.model.jnt_limited.copy()
+        return env.model.jnt_range.copy(), env.model.jnt_limited.copy(), int(env.model.nu)
     finally:
         env.close()
 
@@ -102,7 +99,7 @@ def main() -> int:
     print(f"{len(lengths)} environments, rows per env: {lengths}")
     print(f"  {sum(lengths)} total interactions")
 
-    jnt_range, jnt_limited = joint_limits_from_model()
+    jnt_range, jnt_limited, _ = joint_limits_from_model()
 
     result = {
         "seed": args.seed,

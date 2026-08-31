@@ -213,6 +213,56 @@ Give each run its own `trajectory_log` directory. The files open in **append** m
 PID-based names, so two runs sharing a directory do not overwrite — they silently merge into one
 inflated coverage number, with no error.
 
+## 6c. Panda Push (§15)
+
+Same pipeline, different task. Step 3's install script places three extra links, one of them inside
+the **Menagerie** clone — `panda_push.xml` must sit beside `scene.xml` for its `<include>` to
+resolve. Re-run it after pulling:
+
+```bash
+bash "$REPO/scripts/install_env_wrapper.sh"
+ls -l "$REPO/third_party/mujoco_menagerie/franka_emika_panda/panda_push.xml"
+```
+
+```bash
+cd "$REPO/sheeprl"
+MUJOCO_GL=egl PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python sheeprl.py \
+  exp=p2e_dv3_exploration \
+  env=menagerie_panda_push \
+  env.num_envs=4 \
+  env.wrapper.trajectory_log="$REPO/results/runs/push_seed1/trajectories" \
+  root_dir=p2e_dv3_exploration/MenageriePandaPush \
+  algo.cnn_keys.encoder=[] algo.cnn_keys.decoder=[] \
+  algo.mlp_keys.encoder=[state] algo.mlp_keys.decoder=[state] \
+  algo.dense_units=512 algo.mlp_layers=2 \
+  algo.world_model.recurrent_model.recurrent_state_size=512 \
+  algo.world_model.transition_model.hidden_size=512 \
+  algo.world_model.representation_model.hidden_size=512 \
+  algo.total_steps=500000 \
+  algo.run_test=False \
+  metric.log_every=1000 \
+  checkpoint.every=10000 \
+  fabric.accelerator=gpu fabric.devices=1 \
+  seed=1
+```
+
+| Differs from §5 | Why |
+|---|---|
+| `env=menagerie_panda_push` | resolves through the Option A symlink to `MenageriePandaPush` |
+| `root_dir=.../MenageriePandaPush` | keeps Push's logs out of Reach's tree; without it both tasks land under the same run directory |
+
+Unchanged and load-bearing: `env.num_envs=4`, the DreamerV3-S sizing, and `algo.mlp_keys` — the
+observation is still a single `state` key, now 30-dimensional rather than 24. `nu` is still 8, so the
+action space and every `algo.*` flag carry over untouched.
+
+Resume, metrics and evaluation are identical to Reach's §6b, §8 and §9 — nothing in those commands
+names a task. `metrics.py run` reads Push's `diag_*.f32` with no extra flags, because the row stays
+17 columns wide (`nu + 9`) and the reader splits on `nu`.
+
+**`beta` is not frozen.** `ENVIRONMENT_SPEC.md` §13 records that `beta=10` compresses the reward into
+its top 60 % for Push's distance distribution, and that `beta=30` matches what `alpha=10` does for
+Reach. Freeze a value and record it before launching a real Push run.
+
 ## 7. Random baseline (§14)
 
 The same pipeline as §5 at the same budget and seeds — the acting policy is the only difference. The

@@ -1,6 +1,6 @@
-# ENVIRONMENT_SPEC.md — Menagerie Panda Reach
+# ENVIRONMENT_SPEC.md - Menagerie x SheepRL/Plan2Explore DreamerV3
 
-> Implements: `References/SelfEx-WM_Notes.tex` **§8 Phase 2: First Menagerie Task — Panda Reach**
+> Implements: `References/SelfEx-WM_Notes.tex` **§8 Phase 2: First Menagerie Task - Panda Reach**
 > (§8.1 Task, §8.2 Observation, §8.3 Action, §8.4 Control interval).
 > Frozen at execution-order step 11 (§18); after that, any change invalidates prior runs.
 
@@ -20,10 +20,10 @@ supplies them to the code. They must never disagree.
 | Robot | Franka Emika Panda |
 | Menagerie path | `third_party/mujoco_menagerie/franka_emika_panda/` |
 | Model loaded | `third_party/mujoco_menagerie/franka_emika_panda/scene.xml`, **unmodified** |
-| Task MJCF | none yet — see "Why no task MJCF" below |
-| `nq` / `nv` | 9 / 9 — 7 arm joints + 2 finger joints |
+| Task MJCF | none yet - see "Why no task MJCF" below |
+| `nq` / `nv` | 9 / 9 - 7 arm joints + 2 finger joints |
 | End-effector reference | computed: `data.xpos[hand] + data.xmat[hand] @ (0, 0, 0.1034)` |
-| Actuator set | all 8 — `actuator1..7` (arm) + `actuator8` (gripper) |
+| Actuator set | all 8 - `actuator1..7` (arm) + `actuator8` (gripper) |
 | `nu` (action dim) | 8 |
 
 Menagerie's Panda defines **no sites at all** (`nsite == 0`), so `p_ee` does not exist in the stock
@@ -34,11 +34,11 @@ along the hand frame's +z, between the fingers). Exact, no model surgery, Menage
 
 §5's layout lists `menagerie_tasks/panda_reach.xml`, and one was written, but nothing in §8 needs it:
 
-- `p_ee` is computed from the `hand` body pose — no site required.
+- `p_ee` is computed from the `hand` body pose - no site required.
 - `g` is a number the environment samples, writes into the observation, and measures `d_t` against.
   It has no mass, no geometry, and no effect on the physics, so it need not exist in the model.
 
-A target `site` and a fixed camera are therefore **purely cosmetic** — they only make `g` visible in
+A target `site` and a fixed camera are therefore **purely cosmetic** - they only make `g` visible in
 rendered frames. Deferred until §10's render test needs a viewpoint, at which point `mujoco.MjSpec`
 can attach them to the loaded model from Python.
 
@@ -46,13 +46,13 @@ The task file was dropped rather than fixed because making it work required copy
 `scene.xml` contents into this repository. MuJoCo compounds the base directory across nested
 cross-directory `<include>`s: `scene.xml` contains a bare `<include file="panda.xml"/>`, and
 including `scene.xml` from `menagerie_tasks/` made MuJoCo resolve that to
-`franka_emika_panda/third_party/mujoco_menagerie/franka_emika_panda/panda.xml` — the path twice —
+`franka_emika_panda/third_party/mujoco_menagerie/franka_emika_panda/panda.xml` - the path twice -
 which does not exist. Inlining the upstream scene to avoid the nesting would have created a silent
 fork of a checkout that §6 pins by SHA precisely so it has one source of truth. Loading `scene.xml`
 directly as the top-level model makes its own relative includes resolve correctly and copies nothing.
 
 `actuator1..7` are **position** actuators whose `ctrlrange` equals the joint limit in radians, so a
-control is an absolute joint target. `actuator8` is the gripper on a `[0, 255]` scale — a different
+control is an absolute joint target. `actuator8` is the gripper on a `[0, 255]` scale - a different
 unit entirely, which §8.3's affine map handles without special-casing.
 
 The gripper is included because §8.3 says to use the robot's native actuator interface with
@@ -111,13 +111,13 @@ uniform-in-box as specified. §13's success rate must be read against a 1 % no-o
 
 `alpha = 10` is **frozen** and confirmed against this measured distribution: `r(0.017) = 0.997`,
 `r(0.27) = 0.478`, `r(0.50) = 0.082`. The reward spans its full range across the distances the task
-actually produces, rather than saturating near 1 or collapsing to 0 — so the task actor gets an
+actually produces, rather than saturating near 1 or collapsing to 0 - so the task actor gets an
 informative gradient from anywhere in the box.
 
 Joint jitter exists so different seeds produce different initial states, not just different targets
 (§10 "Seed separation"). It is small enough not to disturb the `home` pose's kinematic character.
 
-The target box must be validated as genuinely reachable — see `tests/test_target_sampling.py` and the
+The target box must be validated as genuinely reachable - see `tests/test_target_sampling.py` and the
 `scripts/stress_rollout.py` target-distance distribution.
 
 **The task reward exists only so the task actor can be evaluated.** The exploration actor optimizes the
@@ -146,23 +146,23 @@ Exposed as a flat single-key dict of NumPy arrays, which is what SheepRL's MLP e
 | `obs_dim` | `24` = `nq(9) + nv(9) + p_ee(3) + g(3)` |
 | SheepRL encoder keys | `algo.mlp_keys.encoder=[state]`, `algo.cnn_keys.encoder=[]` |
 | Observation mode | `vector` (manifest field `observation_mode`) |
-| Normalization | none in the env — SheepRL handles its own scaling |
+| Normalization | none in the env - SheepRL handles its own scaling |
 
 Single flat key, deliberately: it keeps the observation contract identical between this task and Panda
 Push (§15), where only `obs_dim` changes.
 
-`q_t` is the full `nq = 9` vector — 7 arm joints plus **both** finger joints — not the 7 arm joints
+`q_t` is the full `nq = 9` vector - 7 arm joints plus **both** finger joints - not the 7 arm joints
 alone. §8.2 says only "at minimum", and neither Menagerie nor Plan2Explore fixes the convention
 (Plan2Explore is DMC-only and pixel-based; SheepRL's DMC wrapper flattens whatever a task declares).
 The deciding argument is consistency with §8.3: the gripper **is** actuated. A joint the policy can
-move but the world model cannot see makes its effect look like irreducible noise — exactly the
+move but the world model cannot see makes its effect look like irreducible noise - exactly the
 aleatoric uncertainty Plan2Explore's ensemble must not mistake for epistemic uncertainty, and an
 inexhaustible source of intrinsic reward for an exploration actor that learns to wiggle the gripper.
 If it is actuated, it is observed.
 
 Menagerie couples the fingers with an equality constraint (`finger_joint2` mirrors `finger_joint1`),
-so one observation dimension is exactly redundant. Harmless — a constant linear dependence the
-encoder learns to ignore — and it keeps `q_t` literally equal to `data.qpos`, with no index masking.
+so one observation dimension is exactly redundant. Harmless - a constant linear dependence the
+encoder learns to ignore - and it keeps `q_t` literally equal to `data.qpos`, with no index masking.
 
 ## 4. Action (§8.3)
 
@@ -175,7 +175,7 @@ Native actuator interface, normalized:
 |---|---|
 | `action_space` | `gymnasium.spaces.Box(low=-1.0, high=1.0, shape=(8,), dtype=np.float32)` |
 | `u_min`, `u_max` | read from `model.actuator_ctrlrange`, never hard-coded |
-| Unbounded actuators | none — all 8 have `ctrllimited == True`; the env asserts this at construction |
+| Unbounded actuators | none - all 8 have `ctrllimited == True`; the env asserts this at construction |
 | Clipping | actions clipped to `[-1, 1]` before denormalization |
 | Action mode | `normalized_native_actuator` (manifest field `action_mode`) |
 
@@ -188,10 +188,10 @@ Plan2Explore is never told about robot-specific action units. The environment do
 | Item | Value |
 |---|---|
 | `Δt_control` | `0.05` s |
-| `Δt_sim` (`model.opt.timestep`) | `0.002` s — from the compiled model |
-| `n_substeps` | `25` — exact, asserted integer at construction |
+| `Δt_sim` (`model.opt.timestep`) | `0.002` s - from the compiled model |
+| `n_substeps` | `25` - exact, asserted integer at construction |
 | `render_fps` | `20` (= `1 / Δt_control`) |
-| `action_repeat` (SheepRL) | `1` — the env already integrates the control interval |
+| `action_repeat` (SheepRL) | `1` - the env already integrates the control interval |
 
 Both `Δt_control` and `Δt_sim` are recorded in every run manifest (§17).
 
@@ -201,7 +201,7 @@ Both `Δt_control` and `Δt_sim` are recorded in every run manifest (§17).
 |---|---|
 | `max_episode_steps` | `100` control steps |
 | Episode duration | `5.0` s = `100 * 0.05` |
-| `terminated` | always `False` — reaching is not an absorbing task; success does not end the episode |
+| `terminated` | always `False` - reaching is not an absorbing task; success does not end the episode |
 | `truncated` | `True` when `step_count >= max_episode_steps` |
 
 `terminated` is held at `False` on purpose: an early-terminating episode would leak task information
@@ -257,10 +257,150 @@ the suite never closed; or genuine solver divergence under sustained maximum con
 
 Relevant because §12's budgets step this environment 10^5-10^6 times. A crash rare enough to hide in
 a test suite is near-certain over a Gate C run. If a training run dies with no Python traceback, this
-is the first thing to check — not a Plan2Explore or SheepRL bug.
+is the first thing to check - not a Plan2Explore or SheepRL bug.
 
 ## 11. Out of scope for Panda Reach
 
 Contact, objects, and the table are deliberately absent. Free-space reaching isolates environment
 correctness, action scaling, state estimation, Plan2Explore learning, exploration coverage, and task
 actor learning before contact-rich manipulation is introduced in Panda Push (§15).
+
+---
+
+# Panda Push (§15)
+
+Everything below describes `menagerie_integration/menagerie_panda_push.py`. Where a value is not
+restated here it is identical to Panda Reach's above.
+
+## 12. Scene and model
+
+| Item | Value |
+|---|---|
+| Task MJCF | `menagerie_tasks/panda_push.xml` |
+| Model loaded | that file, **via the symlink beside Menagerie's `scene.xml`** |
+| `nq` / `nv` / `njnt` | `16` / `15` / `10` |
+| `nu` (action dim) | `8` - **unchanged from Reach** |
+| Table geom | static box, half-extents `(0.30, 0.40, 0.11)` at `(0.5, 0, 0.11)`; top surface `z = 0.22` |
+| Cube geom | box, half-extent `0.025` (5 cm cube), mass `0.05` kg, `friction="1 0.005 0.0001"` |
+| Cube joint | `cube_free`, a free joint - `qposadr 9`, `dofadr 9` |
+
+The MJCF must be loaded from inside the Menagerie directory. `panda_push.xml` contains
+`<include file="scene.xml"/>`, and MuJoCo resolves that relative to the file being loaded; only as a
+sibling of `scene.xml` does the include work, for the reason §1's "Why no task MJCF" records.
+`scripts/install_env_wrapper.sh` places the link and excludes it from that clone's `git status`. No
+tracked Menagerie file changes, so the §6 SHA pin still verifies.
+
+Adding the cube leaves `nu` at 8, so **Push and Reach share an action space** and stay comparable -
+which is why §1 keeps the gripper actuator in Reach despite it being pure noise there.
+
+`nq != njnt` for the first time: a free joint carries 7 `qpos` entries and 6 dofs but counts as one
+joint. Any code slicing `qpos` by joint index is wrong here, which is why §13.2's joint metrics log
+only the 9 actuated joints and `metrics.py` splits the diagnostics row on `nu`.
+
+The wrapper reads the cube's half-extent and the table top's height **off the compiled model** rather
+than repeating them in Python, so the MJCF is the single source of truth for both.
+
+## 13. Task (§15)
+
+At reset, sample a planar target `g = (g_x, g_y)` uniformly from a fixed region of the table top,
+at the cube's resting height. With `p_cube(s_t)` the cube's centre:
+
+    d_t = || p_cube(s_t) - g ||_2
+    r_task_t = exp(-beta * d_t^2)
+    success_t = 1[ d_t < epsilon ]
+
+| Constant | Value | Notes |
+|---|---|---|
+| `target_box_low` | `(0.35, -0.20)` | metres, world frame; planar |
+| `target_box_high` | `(0.65,  0.20)` | |
+| target `z` | `0.245` | derived: table top `0.22` + cube half-extent `0.025` |
+| `cube_init_xy` | `(0.45, 0.0)` | |
+| `cube_jitter` | `U(-0.03, +0.03)` m on x and y | |
+| `beta` | `10.0` | **NOT frozen** - see the measurement below |
+| `success_tol` (`epsilon`) | `0.05` | 5 cm, as Reach |
+
+The distance is cube-to-goal, not end-effector-to-goal. That single change is the substance of §15:
+the arm must make contact and transport the cube, where Reach only had to arrive.
+
+### Measured start-state distribution (2000 seeds, 2026-08-31)
+
+Cube start and goal are both drawn in the plane at the same `z`, so `d_0` is a planar distance and
+the distribution follows from the sampling alone - no physics involved.
+
+| Quantity | Value |
+|---|---|
+| `d_0` p0 / p25 / median / p75 / p100 | `0.006` / `0.100` / `0.146` / `0.188` / `0.304` m |
+| `d_0` mean | `0.144` m |
+| Episodes starting inside the 5 cm tolerance | **6.05 %** |
+| Episodes starting within 10 cm | 24.85 % |
+
+**The no-op floor is 6 %, six times Reach's 1.05 %.** A policy that never touches the cube scores
+about 6 % on §13.1's success rate, because the cube starts near the centre of a region only
+0.30 x 0.40 m. §13's success rate must be read against that floor, and §14's random-action baseline
+measures it directly. It is a property of the geometry, not of `beta`: widening the target region,
+shrinking `cube_jitter`, or excluding a disc around the cube's start would each reduce it.
+
+### `beta` is not yet frozen
+
+`alpha = 10` was chosen for Reach only after confirming the reward spanned its range across the
+distances that task produces. Carrying the same constant to Push does **not** hold, because Push's
+distances are roughly half Reach's and distance enters squared:
+
+| | Reach, `alpha = 10` | Push, `beta = 10` | Push, `beta = 30` |
+|---|---|---|---|
+| median `d_0` | 0.272 m | 0.146 m | 0.146 m |
+| `r` at median | 0.478 | 0.807 | 0.526 |
+| `r` at the worst start | 0.082 | 0.398 | 0.063 |
+| spread (max - min) | 0.915 | 0.602 | 0.936 |
+
+At `beta = 10` the reward is compressed into its top 60 %: an untouched cube already scores 0.81 at
+the median start. `beta = 30` reproduces `alpha = 10`'s character for this distribution almost
+exactly. The code still ships `10.0`; **freeze a value and record it here before any Push training
+begins**, exactly as §2 did for `alpha`.
+
+## 14. Observation (§15)
+
+    o_t = [ q_t, q̇_t, p_ee,t, p_cube,t, ṗ_cube,t, g ]
+
+| Block | Dim | Source |
+|---|---|---|
+| `q_t` | 9 | `data.qpos[:9]` - arm + fingers, **not** the cube's free joint |
+| `q̇_t` | 9 | `data.qvel[:9]` |
+| `p_ee,t` | 3 | hand body pose + TCP offset, as Reach |
+| `p_cube,t` | 3 | `data.xpos[cube]` |
+| `ṗ_cube,t` | 3 | `data.qvel[dofadr:dofadr+3]` - a free joint's first three dofs are world-frame linear velocity |
+| `g` | 3 | planar target, `z` fixed |
+| **total** | **30** | |
+
+`q_t` deliberately excludes the cube's free-joint coordinates: they would duplicate `p_cube` and add
+a quaternion §15 does not ask for. It also keeps `state[:9]` meaning joint positions, which
+`scripts/buffer_metrics.py` relies on for both tasks.
+
+## 15. Episode structure
+
+| Item | Value |
+|---|---|
+| `max_episode_steps` | `200` control steps |
+| Episode duration | `10.0` s = `200 * 0.05` |
+| `terminated` | always `False`, as Reach |
+
+Double Reach's horizon: pushing needs approach, contact and transport where reaching needs only
+approach. Not yet validated against a measured time-to-success - if 10 s proves too short for any
+policy to finish, the success rate floors at the 6 % no-op rate and the task is uninformative.
+
+## 16. `info` dict
+
+As Reach's §7, with `distance` now cube-to-goal, plus:
+
+| Key | Type | Purpose |
+|---|---|---|
+| `cube_position` | `(3,) float32` | cube trajectory, and any later cube-coverage metric |
+
+`ctrl_saturation` is absent: §13.2's saturation is computed from the `diag_*.f32` stream, which
+records the normalized action directly.
+
+## 17. Out of scope for Panda Push
+
+Coverage stays **end-effector** coverage (§13.2), unchanged from Reach. Whether the cube reached
+interesting regions is an evaluation question about a trained task actor, not an exploration metric,
+and is deferred.

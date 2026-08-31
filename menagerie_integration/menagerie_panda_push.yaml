@@ -1,0 +1,65 @@
+# menagerie_panda_push.yaml
+#
+# Implements: References/SelfEx-WM_Notes.tex §15 Phase 9, via §11.1's Option A.
+# Installed to sheeprl/sheeprl/configs/env/menagerie_panda_push.yaml by
+# scripts/install_env_wrapper.sh.
+#
+# Mirrors menagerie_panda_reach.yaml. Every wrapper argument is a constant frozen in
+# ENVIRONMENT_SPEC.md; this file is the single place they reach the code.
+
+defaults:
+  - default
+  - _self_
+
+id: MenageriePandaPush
+
+# §8.4: the environment integrates dt_control = 0.05 s over 25 physics substeps itself, so SheepRL
+# must not repeat actions on top of that.
+action_repeat: 1
+
+capture_video: false
+
+# §15: 200 control steps = 10.0 s, double Reach's horizon. Pushing needs approach, contact and
+# transport where reaching needs only approach.
+max_episode_steps: 200
+
+wrapper:
+  _target_: sheeprl.envs.menagerie_panda_push.MenageriePandaPush
+  seed: ${seed}
+
+  # xml_path is omitted deliberately: menagerie_panda_push.py resolves it from its own file
+  # location, and Path.resolve() follows the §11.1 symlink back to menagerie_integration/. It
+  # resolves to the copy symlinked BESIDE Menagerie's scene.xml, which is what makes that file's
+  # own relative includes work -- see ENVIRONMENT_SPEC.md §1.
+
+  # §8.4 control interval
+  control_dt: 0.05
+  max_episode_steps: 200
+
+  # §15 task. beta is NOT yet frozen: alpha=10 for Reach was chosen only after measuring the
+  # start-state distribution over 2000 seeds. beta needs the same treatment against the
+  # cube-to-goal distribution before any Push training is launched.
+  beta: 10.0
+  success_tol: 0.05
+
+  # Planar target region on the table top (§15). Two values, not three: z is pinned to the cube's
+  # resting height, which the wrapper derives from the table and cube geoms rather than repeating
+  # a number that also lives in the MJCF.
+  target_box_low: [0.35, -0.20]
+  target_box_high: [0.65, 0.20]
+
+  # Cube start, jittered so seeds differ in more than the goal.
+  cube_init_xy: [0.45, 0.0]
+  cube_jitter: 0.03
+
+  # §8.1 initial arm configuration
+  joint_jitter: 0.05
+
+  # §9 rendering. Off during training; used by evaluation videos and the §10 render test.
+  render_mode: null
+  render_height: 480
+  render_width: 640
+
+  # §13 trajectory logging. Override per run so seeds do not mix:
+  #     env.wrapper.trajectory_log=<repo>/results/runs/push_seed1/trajectories
+  trajectory_log: null

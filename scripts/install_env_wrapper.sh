@@ -26,6 +26,19 @@ SRC_DIR="${REPO_ROOT}/menagerie_integration"
 ENV_DEST="${SHEEPRL_DIR}/sheeprl/envs/menagerie_panda.py"
 CFG_DEST="${SHEEPRL_DIR}/sheeprl/configs/env/menagerie_panda_reach.yaml"
 
+# §15 Panda Push. The wrapper and config go into the SheepRL checkout like Reach's, but the task
+# MJCF goes into the MENAGERIE checkout: panda_push.xml contains `<include file="scene.xml"/>`, and
+# MuJoCo resolves that relative to the file being loaded. Only as a sibling of scene.xml does the
+# include work -- from anywhere else MuJoCo compounds base directories and mis-resolves scene.xml's
+# own `<include file="panda.xml"/>`. See ENVIRONMENT_SPEC.md §1.
+#
+# The MJCF's source is menagerie_tasks/, per §5's repo layout; the wrapper and config keep the
+# menagerie_integration/ home they share with Reach's.
+TASKS_DIR="${REPO_ROOT}/menagerie_tasks"
+PUSH_ENV_DEST="${SHEEPRL_DIR}/sheeprl/envs/menagerie_panda_push.py"
+PUSH_CFG_DEST="${SHEEPRL_DIR}/sheeprl/configs/env/menagerie_panda_push.yaml"
+PUSH_XML_DEST="${MENAGERIE_DIR}/franka_emika_panda/panda_push.xml"
+
 # ---------------------------------------------------------------------------
 # link_file <source> <destination>
 #
@@ -69,15 +82,35 @@ log "Phase 5 Option A: installing the environment wrapper into the SheepRL check
 link_file "${SRC_DIR}/menagerie_panda.py" "${ENV_DEST}"
 link_file "${SRC_DIR}/menagerie_panda_reach.yaml" "${CFG_DEST}"
 
+link_file "${SRC_DIR}/menagerie_panda_push.py" "${PUSH_ENV_DEST}"
+link_file "${SRC_DIR}/menagerie_panda_push.yaml" "${PUSH_CFG_DEST}"
+link_file "${TASKS_DIR}/panda_push.xml" "${PUSH_XML_DEST}"
+
+# The link above is the only thing this repository puts inside the pinned Menagerie clone. No
+# tracked file is touched, so check_pins()'s `git rev-parse HEAD` still matches -- but the link
+# would show as untracked and read like drift, so exclude it locally.
+MENAGERIE_EXCLUDE="${MENAGERIE_DIR}/.git/info/exclude"
+if [[ -d "$(dirname "${MENAGERIE_EXCLUDE}")" ]]; then
+  if ! grep -qxF "franka_emika_panda/panda_push.xml" "${MENAGERIE_EXCLUDE}" 2>/dev/null; then
+    echo "franka_emika_panda/panda_push.xml" >>"${MENAGERIE_EXCLUDE}"
+    log "excluded franka_emika_panda/panda_push.xml from the Menagerie clone's git status"
+  fi
+else
+  warn "no ${MENAGERIE_EXCLUDE}; the panda_push.xml link will show as untracked in Menagerie"
+fi
+
 # Prove the import path Hydra's _target_ will use actually resolves.
 if [[ -x "${VENV_DIR}/bin/python" ]]; then
   log "verifying sheeprl.envs.menagerie_panda imports"
   venv_python -c "
 from sheeprl.envs.menagerie_panda import MenageriePandaReach
-e = MenageriePandaReach()
-print(f'  ok: obs {e.observation_space[\"state\"].shape}, act {e.action_space.shape}, '
-      f'n_substeps {e.n_substeps}')
-" || die "import failed -- _target_ in menagerie_panda_reach.yaml will not resolve"
+from sheeprl.envs.menagerie_panda_push import MenageriePandaPush
+for cls in (MenageriePandaReach, MenageriePandaPush):
+    e = cls()
+    print(f'  ok: {cls.__name__} obs {e.observation_space[\"state\"].shape}, '
+          f'act {e.action_space.shape}, n_substeps {e.n_substeps}')
+    e.close()
+" || die "import failed -- a _target_ in one of the env configs will not resolve"
 else
   warn "no virtualenv at ${VENV_DIR}; skipping the import check"
 fi

@@ -1,0 +1,40 @@
+<!--
+  panda_push.xml - the §15 Panda Push scene.
+
+  Implements: References/SelfEx-WM_Notes.tex §15 Phase 9 - "a table, free cube, planar target
+  region, and robot/cube contacts".
+
+  Loaded via the symlink scripts/install_env_wrapper.sh places BESIDE Menagerie's scene.xml. The
+  include below is a bare sibling reference and only resolves from there: loading this file from
+  menagerie_tasks/ makes MuJoCo compound base directories and mis-resolve scene.xml's own
+  <include file="panda.xml"/>. ENVIRONMENT_SPEC.md §1 records that failure.
+
+  Menagerie is untouched - the link is the only thing this repository puts inside that clone, and
+  no tracked file changes, so the §6 SHA pin still verifies.
+
+  Adding the cube leaves nu at 8, so Push and Reach share an action space and stay comparable
+  (ENVIRONMENT_SPEC.md §1). It does change nq 9->16, nv 9->15 and njnt 9->10.
+
+  The wrapper reads the cube's half-extent and the table top's height off the compiled model
+  rather than repeating them, so these numbers can be tuned here alone.
+-->
+<mujoco model="panda_push">
+  <include file="scene.xml"/>
+
+  <worldbody>
+    <!-- Static: no joint, so it is welded to the world and the arm can push against it. Top
+         surface sits at pos_z + size_z = 0.22. -->
+    <body name="table" pos="0.5 0 0.11">
+      <geom name="table_top" type="box" size="0.30 0.40 0.11"
+            rgba="0.55 0.45 0.35 1" friction="1 0.005 0.0001"/>
+    </body>
+
+    <!-- 5 cm cube, 50 g. The free joint is what makes nq != njnt, which is why §13.2's
+         joint-limit metric logs only the actuated joints. -->
+    <body name="cube" pos="0.45 0.0 0.245">
+      <freejoint name="cube_free"/>
+      <geom name="cube_geom" type="box" size="0.025 0.025 0.025" mass="0.05"
+            rgba="0.85 0.2 0.2 1" friction="1 0.005 0.0001"/>
+    </body>
+  </worldbody>
+</mujoco>

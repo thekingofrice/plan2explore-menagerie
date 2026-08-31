@@ -452,13 +452,22 @@ def _diagnostics_metrics(diag: list[np.ndarray], checkpoint: Path | None) -> dic
 
     from buffer_metrics import joint_limits_from_model
 
-    jnt_range, jnt_limited = joint_limits_from_model()
-    njnt = len(jnt_range)
+    jnt_range, jnt_limited, nu = joint_limits_from_model()
 
     if diag:
-        # Row layout is [action(nu), qpos(njnt)]; nu varies by model, njnt anchors the split.
-        actions = [d[:, :-njnt] for d in diag]
-        qpos = [d[:, -njnt:] for d in diag]
+        # Row layout is [action(nu), qpos(...)]. Split on nu, not on the joint count: a task can log
+        # fewer joints than the model has, and §15's free cube adds a joint that carries no limits
+        # and is deliberately not logged. Splitting on the joint count would take an action column
+        # as a joint position and report it silently.
+        n_joints = diag[0].shape[1] - nu
+        if n_joints <= 0 or n_joints > len(jnt_range):
+            raise ValueError(
+                f"diag rows are {diag[0].shape[1]} wide with nu={nu}, implying {n_joints} joint "
+                f"columns against a model with {len(jnt_range)} joints."
+            )
+        actions = [d[:, :nu] for d in diag]
+        qpos = [d[:, nu:] for d in diag]
+        jnt_range, jnt_limited = jnt_range[:n_joints], jnt_limited[:n_joints]
         source, steps = "trajectory_log", int(sum(len(d) for d in diag))
     else:
         from buffer_metrics import read_buffer
