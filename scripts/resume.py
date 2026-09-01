@@ -59,15 +59,31 @@ def main() -> int:
         print(f"SheepRL not cloned at {SHEEPRL_DIR} -- see SYNTAX.md step 1", file=sys.stderr)
         return 1
 
-    resume = [o for o in overrides if o.startswith("checkpoint.resume_from=")]
-    ckpt = resume[0].split("=", 1)[1] if resume else ""
-    if not ckpt or not Path(ckpt).is_file():
-        # An empty or wrong path is falsy to `if cfg.checkpoint.resume_from:`, so SheepRL would
-        # silently start a FRESH run from step 0 instead of resuming. Fail loudly instead.
+    # Two callers, two key names: resuming an interrupted run uses checkpoint.resume_from, while
+    # p2e_dv3_finetuning takes the exploration run's checkpoint as checkpoint.exploration_ckpt_path.
+    # Both need the same torch.load patch, so both are accepted here.
+    key, ckpt = "", ""
+    for name in ("checkpoint.resume_from", "checkpoint.exploration_ckpt_path"):
+        match = [o for o in overrides if o.startswith(f"{name}=")]
+        if match:
+            key, ckpt = name, match[0].split("=", 1)[1]
+            break
+
+    if not key:
         print(
-            f"checkpoint.resume_from does not point at a file: {ckpt!r}\n"
+            "no checkpoint override found. Pass checkpoint.resume_from=<ckpt> to continue an "
+            "interrupted run, or checkpoint.exploration_ckpt_path=<ckpt> to finetune from one.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not ckpt or not Path(ckpt).is_file():
+        # An empty or wrong path is falsy to SheepRL's `if cfg.checkpoint.resume_from:`, so it would
+        # silently start a FRESH run from step 0. An unset shell variable produces exactly this.
+        print(
+            f"{key} does not point at a file: {ckpt!r}\n"
             "Refusing: SheepRL treats an unset value as 'start from scratch', which would discard "
-            "the run you are trying to continue.",
+            "the run you are trying to continue from.",
             file=sys.stderr,
         )
         return 1
@@ -78,7 +94,7 @@ def main() -> int:
     sys.path.insert(0, str(SHEEPRL_DIR))
 
     patch_torch_load()
-    print(f"resuming from {ckpt}\n")
+    print(f"{key} = {ckpt}\n")
 
     from sheeprl.cli import run
 

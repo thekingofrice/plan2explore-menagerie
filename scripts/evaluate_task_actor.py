@@ -42,6 +42,15 @@ sys.path.insert(0, str(REPO_ROOT / "sheeprl"))
 #: value is far outside the range training seeds reach, so no evaluation episode was trained on.
 DEFAULT_EVAL_SEED = 100
 
+#: What the checkpoint's algo.name implies about the actor being evaluated. "zero-shot" means the
+#: task actor was trained only in imagination and never acted; "few-shot" means it has since
+#: collected its own data. Reporting the wrong one confuses Plan2Explore's headline claim with its
+#: adaptation result.
+REGIMES = {
+    "p2e_dv3_exploration": "zero-shot",
+    "p2e_dv3_finetuning": "few-shot",
+}
+
 
 
 def _load(path: Path):
@@ -330,7 +339,12 @@ def main() -> int:
     out = {
         "seed": args.seed,
         "actor": "task",
-        "regime": "zero-shot",
+        # Read off the checkpoint's own config, not assumed: an actor from p2e_dv3_exploration was
+        # trained purely in imagination and has never acted (Figure 3's zero-shot regime), while one
+        # from p2e_dv3_finetuning has interacted with the environment (Figure 4's few-shot). Same
+        # script, same rollout, different claim.
+        "regime": REGIMES.get(cfg.algo.get("name", ""), "unknown"),
+        "algo_name": cfg.algo.get("name", ""),
         "eval_seed": args.eval_seed,
         "task_metrics_task_actor": points[-1],
         "zero_shot_curve": points,
