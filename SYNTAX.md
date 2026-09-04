@@ -263,6 +263,116 @@ names a task. `metrics.py run` reads Push's `diag_*.f32` with no extra flags, be
 squared, so `alpha=10` would compress the reward into its top 60 %. `ENVIRONMENT_SPEC.md` §13 carries
 the measurement.
 
+## 6d. Finetuning — the few-shot regime (§13.1)
+
+Exploration trains `actor_task` **purely in imagination**: it never acts, and §9's evaluation of an
+exploration checkpoint is therefore Plan2Explore's *zero-shot* claim. `p2e_dv3_finetuning` is the
+other half — it loads the exploration checkpoint, keeps the world model and both task actor-critics,
+throws the ensembles away, and continues training on data the **task** actor collects. That is the
+*few-shot* claim. Same task, same environment, different number.
+
+Launch it through `scripts/resume.py`, **not** `sheeprl.py`: the exploration checkpoint carries a
+pickled replay buffer, and torch ≥ 2.6 refuses to unpickle it (see *Known issues*). The script
+accepts `checkpoint.exploration_ckpt_path` for exactly this caller.
+
+```bash
+cd "$REPO"
+RUNNAME=<the exploration run directory name>
+RUNDIR="$REPO/sheeprl/logs/runs/p2e_dv3_exploration/MenageriePandaPush/$RUNNAME"
+
+# the LAST checkpoint of the exploration run — finetuning from an earlier one measures a different
+# exploration budget, which is not the comparison §13.1 asks for
+CKPT=$(ls -1 "$RUNDIR"/version_*/checkpoint/ckpt_500000_0.* | head -1)
+echo "CKPT=$CKPT"
+
+MUJOCO_GL=egl PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+python scripts/resume.py \
+  exp=p2e_dv3_finetuning \
+  env=menagerie_panda_push \
+  env.wrapper.trajectory_log="$REPO/results/runs/push_finetune_seed1/trajectories" \
+  checkpoint.exploration_ckpt_path="$CKPT" \
+  root_dir=p2e_dv3_finetuning/MenageriePandaPush \
+  algo.total_steps=100000 \
+  algo.run_test=False \
+  metric.log_every=1000 \
+  checkpoint.every=10000 \
+  fabric.accelerator=gpu fabric.devices=1 \
+  seed=1
+```
+
+Reach is the same command with `env=menagerie_panda_reach` and
+`root_dir=p2e_dv3_finetuning/MenageriePandaReach`. Nothing else in it names a task.
+
+| Flag | Why |
+|---|---|
+| `exp=p2e_dv3_finetuning` | defaults `algo.learning_starts=16384`, `algo.total_steps=1000000`, `buffer.load_from_exploration=False`, and declares its own aggregator keys — see the tag table below |
+| `env=menagerie_panda_push` | **load-bearing.** Finetuning builds the environment from the *current* config, not the checkpoint's, so the task is chosen here. A mismatch (Push checkpoint, Reach env) fails on the 30-vs-24 observation shape rather than training something wrong |
+| `env.wrapper.trajectory_log=...` | **a new directory.** The files open in append mode; pointed at the exploration run's directory the two phases merge into one inflated, meaningless coverage number with no error |
+| `checkpoint.exploration_ckpt_path=...` | the exploration checkpoint to adapt from. `resume.py` refuses a path that is not a file — SheepRL treats an unset value as "start from scratch" and would silently train a world model from nothing |
+| `root_dir=p2e_dv3_finetuning/MenageriePandaPush` | keeps the phase and the task out of each other's log trees |
+| `algo.total_steps` | **set explicitly.** The default is 1,000,000 — twice the exploration budget, which is not a few-shot regime |
+| `algo.run_test=False`, `metric.log_every`, `checkpoint.every`, `fabric.*` | as §5 |
+| `seed` | the finetuning run's seed. Not inherited from the exploration run, and it appears in the log directory name |
+
+**Do not pass these — they are overwritten from the exploration run's config and any value you type
+is discarded:**
+
+    algo.gamma  algo.lmbda  algo.horizon  algo.layer_norm  algo.dense_units  algo.mlp_layers
+    algo.dense_act  algo.cnn_act  algo.unimix  algo.hafner_initialization
+    algo.world_model  algo.actor  algo.critic
+    algo.cnn_keys  algo.mlp_keys  env.clip_rewards  env.num_envs
+
+That is why §5's DreamerV3-S sizing and `algo.mlp_keys.encoder=[state]` are absent above: the
+finetuned model is required to be the model that was explored with, so restating the geometry could
+only introduce drift. `env.num_envs` comes along with it — the command cannot change it, and
+`num_envs` therefore stays at the exploration run's 4 for the buffer, the metrics and §13.
+
+`algo.learning_starts=16384` is the upstream default and is left alone: the finetuning buffer starts
+**empty** (`buffer.load_from_exploration=False`), so the first 16,384 policy steps are random
+actions, not the task actor. At `num_envs=4` that is 4,096 steps per environment — about **20 Push
+episodes per environment**, against 40 for Reach, because Push's episodes are 200 steps to Reach's
+100. Metrics below split on that boundary.
+
+### Metrics and evaluation
+
+```bash
+FT_RUNDIR="$REPO/sheeprl/logs/runs/p2e_dv3_finetuning/MenageriePandaPush/<finetuning run name>"
+
+python scripts/finetuning_metrics.py \
+  --traj-dir results/runs/push_finetune_seed1/trajectories \
+  --logdir "$FT_RUNDIR/version_0" \
+  --seed 1 --out results/summaries/push_finetune_seed1.json
+
+python scripts/evaluate_task_actor.py \
+  --checkpoint "$FT_RUNDIR/version_0/checkpoint/ckpt_100000_0.ckpt" \
+  --episodes 5000 --seed 1 \
+  --out results/summaries/push_finetune_seed1_eval.json
+```
+
+`finetuning_metrics.py`, not `metrics.py`. Two of §13's metrics stop existing here and it declines to
+compute them rather than reporting a wrong one:
+
+| §13 metric | Under finetuning |
+|---|---|
+| §13.2 `C_workspace` coverage | **not computed.** The acting policy is the task actor, so the trajectories are task-directed. Pooling that with Gate C's exploration coverage would compare two different questions |
+| §13.2 intrinsic reward / ensemble disagreement | **gone.** The ensembles are neither restored nor built, so `Rewards/intrinsic_intrinsic` and `Loss/ensemble_loss` are absent from the event files |
+| §13.3 world-model losses | present, same tags |
+| §12.1 actor/critic losses | `Loss/policy_loss`, `Loss/value_loss` — **no `_task` suffix**, and `Grads/actor`, `Grads/critic` rather than `Grads/actor_task`, `Grads/critic_task`. Only one actor is trained now |
+| §13.1 task success/return/distance | present and, unlike an exploration run, genuinely the task actor's — but *on-policy during training*, which is not `evaluate_task_actor.py`'s held-out score |
+
+Pass `--learning-starts` to `finetuning_metrics.py` only if you overrode `algo.learning_starts`; its
+default already matches the config's 16,384. It reports task metrics twice, over all episodes and
+over the post-prefill ones, because the first ~20 episodes per environment are random actions.
+
+`evaluate_task_actor.py` needs no new flag: it rebuilds the agent from the checkpoint's own
+`config.yaml`, reads `state["world_model"]` and `state["actor_task"]` — key names a finetuning
+checkpoint shares with an exploration one — and tags the result `few-shot` from `algo.name`. The same
+command scores both phases; only the regime in the output JSON differs.
+
+**Read Push's success rate against a 6 % floor, not 0 %** (`ENVIRONMENT_SPEC.md` §13) — six times
+Reach's 1.05 %, because the cube starts near the centre of a 0.30 x 0.40 m target region. A
+finetuning run reporting 8 % has moved almost nothing.
+
 ## 7. Random baseline (§14)
 
 The same pipeline as §5 at the same budget and seeds — the acting policy is the only difference. The
