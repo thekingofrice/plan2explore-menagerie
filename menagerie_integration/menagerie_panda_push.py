@@ -347,6 +347,76 @@ class MenageriePandaPush(gym.Env):
 
         return self._get_obs(), self._info()
 
+    def _dump_data_csv(self, exc: Exception, substep: int) -> None:
+        """Every field of MjData at the moment mj_step raised, as a CSV in the repo root.
+
+        Long format -- one row per (field, index) -- because MjData's arrays have different lengths
+        and nothing is selected in advance. Fields are discovered by introspection so a MuJoCo
+        version that adds one is dumped too. pandas is imported here, not at module scope, so the
+        environment keeps its three runtime dependencies. The filename carries the pid and instance
+        id because four vectorized envs would otherwise overwrite each other's dump.
+        """
+        import pandas as pd
+
+        def expand(name: str, val: Any):
+            """(field, index, value) rows for one MjData attribute, whatever shape it has."""
+            if isinstance(val, (bool, int, float, str, np.integer, np.floating)):
+                yield name, -1, val
+                return
+            try:
+                arr = np.asarray(val, dtype=np.float64).ravel()
+            except (TypeError, ValueError):
+                arr = None
+            if arr is not None:
+                for i, v in enumerate(arr):
+                    yield name, i, float(v)
+                return
+            # mjContact / mjWarningStat / mjSolverStat / mjTimerStat lists: recurse per member.
+            try:
+                items = list(val)
+            except TypeError:
+                yield name, -1, repr(val)
+                return
+            for i, item in enumerate(items):
+                for sub in sorted(dir(item)):
+                    if sub.startswith("_"):
+                        continue
+                    try:
+                        sub_val = getattr(item, sub)
+                    except Exception:  # noqa: BLE001 - a field that will not read is not fatal here
+                        continue
+                    if not callable(sub_val):
+                        yield from expand(f"{name}[{i}].{sub}", sub_val)
+
+        d = self.data
+        rows: list[tuple[str, int, Any]] = [
+            ("_exception", -1, repr(exc)),
+            ("_substep", -1, substep),
+            ("_episode_steps", -1, self.steps),
+            ("_total_steps", -1, self._total_steps),
+        ]
+        for name in sorted(dir(d)):
+            if name.startswith("_"):
+                continue
+            try:
+                val = getattr(d, name)
+            except Exception:  # noqa: BLE001 - skip anything that refuses to read mid-fault
+                continue
+            if not callable(val):
+                rows.extend(expand(name, val))
+
+        # Geom ids are unreadable on their own; the names come from the model, not from data, so
+        # they are added alongside rather than replacing contact[i].geom1/geom2.
+        for i in range(d.ncon):
+            c = d.contact[i]
+            for slot, gid in (("geom1_name", c.geom1), ("geom2_name", c.geom2)):
+                name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, int(gid))
+                rows.append((f"contact[{i}].{slot}", -1, name or str(int(gid))))
+
+        out = REPO_ROOT / f"fpe_data_{os.getpid()}_{id(self):x}.csv"
+        pd.DataFrame(rows, columns=["field", "index", "value"]).to_csv(out, index=False)
+        print(f"mj_step raised {type(exc).__name__}; MjData written to {out}", flush=True)
+
     def step(
         self, action: np.ndarray
     ) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
@@ -356,8 +426,13 @@ class MenageriePandaPush(gym.Env):
         information into the exploration objective through DreamerV3's continue-predictor.
         """
         self.data.ctrl[:] = self._denormalize_action(action)
-        for _ in range(self.n_substeps):
-            mujoco.mj_step(self.model, self.data)
+        substep = 0
+        try:
+            for substep in range(self.n_substeps):
+                mujoco.mj_step(self.model, self.data)
+        except Exception as exc:  # noqa: BLE001 - capturing the state matters more than the type
+            self._dump_data_csv(exc, substep)
+            raise
 
         self.steps += 1
         self._total_steps += 1
