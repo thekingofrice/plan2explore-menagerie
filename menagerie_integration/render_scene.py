@@ -114,6 +114,60 @@ def load_model(
     return spec.compile()
 
 
+#: §15's table and cube, as declared in menagerie_tasks/panda_push.xml. Restated here because
+#: add_push_scene builds them from Python instead of from that file; the two must agree exactly,
+#: which scripts/probe_push_mjspec.py checks field by field.
+TABLE_POS = (0.5, 0.0, 0.11)
+TABLE_SIZE = (0.30, 0.40, 0.11)
+TABLE_RGBA = (0.55, 0.45, 0.35, 1.0)
+CUBE_POS = (0.45, 0.0, 0.245)
+CUBE_SIZE = (0.025, 0.025, 0.025)
+CUBE_MASS = 0.05
+CUBE_RGBA = (0.85, 0.2, 0.2, 1.0)
+SCENE_FRICTION = (1.0, 0.005, 0.0001)
+
+
+def add_push_scene(spec: mujoco.MjSpec) -> mujoco.MjSpec:
+    """Add §15's table and free cube to a spec, the way Reach adds its camera and marker.
+
+    The alternative is menagerie_tasks/panda_push.xml, which must be symlinked beside Menagerie's
+    scene.xml for its <include> to resolve -- the arrangement Reach abandoned in d2ba577. Building
+    the bodies here needs no task MJCF, no symlink inside the pinned clone, and no per-arm file.
+
+    Table before cube, matching the MJCF's element order: body order fixes qpos addresses and
+    contact ordering, so a swap would compile a different model.
+    """
+    table = spec.worldbody.add_body()
+    table.name = "table"
+    table.pos = list(TABLE_POS)
+    top = table.add_geom()
+    top.name = "table_top"
+    top.type = mujoco.mjtGeom.mjGEOM_BOX
+    top.size = list(TABLE_SIZE)
+    top.rgba = list(TABLE_RGBA)
+    top.friction = list(SCENE_FRICTION)
+
+    cube = spec.worldbody.add_body()
+    cube.name = "cube"
+    cube.pos = list(CUBE_POS)
+    try:
+        joint = cube.add_freejoint()
+    except AttributeError:  # older bindings expose only the generic adder
+        joint = cube.add_joint()
+        joint.type = mujoco.mjtJoint.mjJNT_FREE
+    joint.name = "cube_free"
+
+    body = cube.add_geom()
+    body.name = "cube_geom"
+    body.type = mujoco.mjtGeom.mjGEOM_BOX
+    body.size = list(CUBE_SIZE)
+    body.mass = CUBE_MASS
+    body.rgba = list(CUBE_RGBA)
+    body.friction = list(SCENE_FRICTION)
+
+    return spec
+
+
 def measure_scene(model: mujoco.MjModel, cube_geom: str, table_geom: str) -> tuple[float, float]:
     """Cube half-extent and table-top height, read off a compiled model.
 
