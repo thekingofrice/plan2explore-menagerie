@@ -71,20 +71,30 @@ def load_model(
     camera_eye=DEFAULT_CAMERA_EYE,
     camera_look_at=DEFAULT_CAMERA_LOOK_AT,
     target_radius: float = TARGET_RADIUS,
+    add_bodies=None,
 ) -> mujoco.MjModel:
-    """Compile `xml_path`, optionally raising the robot base and adding render assets.
+    """Compile `xml_path`, optionally adding task bodies, raising the robot base, and adding
+    render assets.
 
-    Falls through to a plain from_xml_path when neither is asked for, so a task that needs neither
-    never depends on MjSpec at all.
+    Falls through to a plain from_xml_path when none of the three is asked for, so a task that needs
+    none never depends on MjSpec at all.
+
+    `add_bodies` is a callable taking the spec, for a task that builds its scene in Python rather
+    than from a task MJCF -- see add_drawer_scene. It runs FIRST, so the task's bodies append to
+    worldbody directly after the robot, exactly where a task MJCF's own <worldbody> would put them.
+    That ordering is what fixes their qpos addresses, so the two routes must not disagree on it.
 
     Loading through MjSpec keeps every relative include resolving from the file's own directory,
     exactly as a direct load would -- which is what panda_push.xml's `<include file="scene.xml"/>`
     depends on.
     """
-    if base_height == 0.0 and not render:
+    if base_height == 0.0 and not render and add_bodies is None:
         return mujoco.MjModel.from_xml_path(str(xml_path))
 
     spec = mujoco.MjSpec.from_file(str(xml_path))
+
+    if add_bodies is not None:
+        add_bodies(spec)
 
     if base_height:
         try:
@@ -164,6 +174,107 @@ def add_push_scene(spec: mujoco.MjSpec) -> mujoco.MjSpec:
     body.mass = CUBE_MASS
     body.rgba = list(CUBE_RGBA)
     body.friction = list(SCENE_FRICTION)
+
+    return spec
+
+
+#: Drawer Open's cabinet and drawer, as declared in menagerie_tasks/panda_drawer_open.xml. That file
+#: is kept as the readable reference; this is what actually compiles. The two must agree exactly --
+#: the same two-sources-of-truth risk the TABLE_*/CUBE_* block above carries for Push.
+#:
+#: Cabinet is welded in mid-air: a body with no joint is fixed to the world at whatever height it is
+#: declared, so nothing has to hold it up. Cavity spans x [0.52, 0.72], y [-0.11, 0.11], z [0.30, 0.42].
+CABINET_POS = (0.62, 0.0, 0.36)
+CABINET_RGBA = (0.55, 0.45, 0.35, 1.0)
+#: (name, pos, size) per panel: top, back, and two sides. No bottom and no front -- the slide joint
+#: holds the drawer up, so a shelf would only add contacts.
+CABINET_PANELS = (
+    ("cabinet_top", (0.0, 0.0, 0.065), (0.10, 0.12, 0.005)),
+    ("cabinet_back", (0.105, 0.0, 0.0), (0.005, 0.12, 0.06)),
+    ("cabinet_side_left", (0.0, 0.115, 0.0), (0.10, 0.005, 0.06)),
+    ("cabinet_side_right", (0.0, -0.115, 0.0), (0.10, 0.005, 0.06)),
+)
+
+#: Declared at the closed pose, coincident with the cabinet.
+DRAWER_POS = (0.62, 0.0, 0.36)
+#: Axis is -x so qpos IS the opening in metres: 0 closed, 0.12 fully out. menagerie_panda_drawer_open
+#: reads the range off the compiled model rather than repeating 0.12, so this stays the only source.
+DRAWER_AXIS = (-1.0, 0.0, 0.0)
+DRAWER_RANGE = (0.0, 0.12)
+DRAWER_DAMPING = 5.0
+DRAWER_FRICTIONLOSS = 2.0
+DRAWER_SIZE = (0.09, 0.10, 0.05)
+#: Explicit: at MuJoCo's default density this slab would mass 3.6 kg, above the Panda's rated payload.
+DRAWER_MASS = 0.5
+DRAWER_RGBA = (0.45, 0.38, 0.30, 1.0)
+
+#: Handle on a stem, on the face pointing at the robot. The 0.035 m gap between the drawer face
+#: (local x = -0.09) and the handle's rear face (local x = -0.125) is the point: a finger slots in
+#: beside the stem and pulling in -x catches the cube, so opening does not need a closed grasp. The
+#: cube is 3 cm, well inside the Panda's 8 cm finger opening, so grasping stays available.
+HANDLE_STEM_POS = (-0.1075, 0.0, 0.0)
+HANDLE_STEM_SIZE = (0.0175, 0.008, 0.008)
+HANDLE_STEM_RGBA = (0.30, 0.30, 0.32, 1.0)
+HANDLE_POS = (-0.14, 0.0, 0.0)
+HANDLE_SIZE = (0.015, 0.015, 0.015)
+HANDLE_RGBA = (0.85, 0.2, 0.2, 1.0)
+
+
+def add_drawer_scene(spec: mujoco.MjSpec) -> mujoco.MjSpec:
+    """Add Drawer Open's cabinet and drawer to a spec, the way add_push_scene adds §15's.
+
+    Pass as `load_model(..., add_bodies=add_drawer_scene)`. Unlike Push this is the only route --
+    there is no symlink into the pinned Menagerie clone and no include-resolution constraint.
+
+    Cabinet before drawer, matching the MJCF's element order: body order fixes qpos addresses, so a
+    swap would compile a different model.
+    """
+    cabinet = spec.worldbody.add_body()
+    cabinet.name = "cabinet"
+    cabinet.pos = list(CABINET_POS)
+    for name, pos, size in CABINET_PANELS:
+        panel = cabinet.add_geom()
+        panel.name = name
+        panel.type = mujoco.mjtGeom.mjGEOM_BOX
+        panel.pos = list(pos)
+        panel.size = list(size)
+        panel.rgba = list(CABINET_RGBA)
+        panel.friction = list(SCENE_FRICTION)
+
+    drawer = spec.worldbody.add_body()
+    drawer.name = "drawer"
+    drawer.pos = list(DRAWER_POS)
+
+    joint = drawer.add_joint()
+    joint.name = "drawer_slide"
+    joint.type = mujoco.mjtJoint.mjJNT_SLIDE
+    joint.axis = list(DRAWER_AXIS)
+    joint.range = list(DRAWER_RANGE)
+    # Set explicitly rather than trusting panda.xml's autolimits="true" to survive the spec
+    # round-trip. Without it the range is ignored and the drawer slides out of the world.
+    joint.limited = mujoco.mjtLimited.mjLIMITED_TRUE
+    joint.damping = DRAWER_DAMPING
+    joint.frictionloss = DRAWER_FRICTIONLOSS
+
+    slab = drawer.add_geom()
+    slab.name = "drawer_body"
+    slab.type = mujoco.mjtGeom.mjGEOM_BOX
+    slab.size = list(DRAWER_SIZE)
+    slab.mass = DRAWER_MASS
+    slab.rgba = list(DRAWER_RGBA)
+    slab.friction = list(SCENE_FRICTION)
+
+    for name, pos, size, rgba in (
+        ("handle_stem", HANDLE_STEM_POS, HANDLE_STEM_SIZE, HANDLE_STEM_RGBA),
+        ("handle", HANDLE_POS, HANDLE_SIZE, HANDLE_RGBA),
+    ):
+        geom = drawer.add_geom()
+        geom.name = name
+        geom.type = mujoco.mjtGeom.mjGEOM_BOX
+        geom.pos = list(pos)
+        geom.size = list(size)
+        geom.rgba = list(rgba)
+        geom.friction = list(SCENE_FRICTION)
 
     return spec
 

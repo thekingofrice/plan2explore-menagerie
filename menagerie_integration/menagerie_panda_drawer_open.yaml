@@ -1,0 +1,88 @@
+# menagerie_panda_drawer_open.yaml
+#
+# Implements: Drawer Open, via References/SelfEx-WM_Notes.tex §11.1's Option A. The task itself is
+# not one of the notes' numbered phases.
+# Installed to sheeprl/sheeprl/configs/env/menagerie_panda_drawer_open.yaml by
+# scripts/install_env_wrapper.sh.
+#
+# Mirrors menagerie_panda_push.yaml. Every wrapper argument should be a constant frozen in
+# ENVIRONMENT_SPEC.md; this file is the single place they reach the code. NOTE: that document has no
+# Drawer Open section yet, so nothing below is frozen -- the values live only here and in the
+# wrapper's module constants.
+
+defaults:
+  - default
+  - _self_
+
+id: MenageriePandaDrawerOpen
+
+# §8.4: the environment integrates dt_control = 0.05 s over 25 physics substeps itself, so SheepRL
+# must not repeat actions on top of that.
+action_repeat: 1
+
+capture_video: false
+
+# 200 control steps = 10.0 s, as Push. Approach, hook and pull needs at least what pushing needed.
+max_episode_steps: 200
+
+wrapper:
+  _target_: sheeprl.envs.menagerie_panda_drawer_open.MenageriePandaDrawerOpen
+  seed: ${seed}
+
+  # xml_path is omitted deliberately, as in Push -- but it resolves to something different. Drawer
+  # Open loads Menagerie's scene.xml UNMODIFIED and attaches its cabinet and drawer from Python via
+  # render_scene.add_drawer_scene, so there is no task MJCF in the load path and nothing is written
+  # into the pinned clone. menagerie_tasks/panda_drawer_open.xml is a readable reference only.
+
+  # §8.4 control interval
+  control_dt: 0.05
+  max_episode_steps: 200
+
+  # Reward sharpness. NOT frozen: fitted analytically to the goal distribution below, which is
+  # possible here and was not for Push -- the drawer always starts closed, so d_0 IS the sampled
+  # goal opening with no physics in between. d_0 ~ U(0.010, 0.102), median 0.056.
+  #
+  # beta carries units of 1/m^2: exp(-beta d^2) is exp(-(d/L)^2) with L = 1/sqrt(beta), so it is a
+  # length scale, not a shape parameter. Sharing Push's reward FORM does not mean sharing its beta.
+  # Reach a=10 (L=0.316), Push b=30 (L=0.183) and this b=200 (L=0.071) all sit at d/L ~ 0.8 and
+  # r(median) ~ 0.5 -- one choice on three rulers. Push's 30 here would score an untouched drawer
+  # 0.910 at the median.
+  #
+  # beta is fitted TO the two bounds below. Change either and this must be refitted, not carried.
+  beta: 200.0
+
+  # 1 cm of the drawer's 12 cm travel. Reach and Push both use 5 cm, which here would call the
+  # drawer open while it is still 42 % shut, so their tolerance does not transfer.
+  success_tol: 0.01
+
+  # Goal opening, sampled per episode onto the handle's travel line. Both ends exclude a band one
+  # success_tol wide, because a goal inside either band is satisfied without the behaviour the task
+  # measures:
+  #
+  #   - below success_tol the drawer is already there at reset, since it always starts closed. A
+  #     do-nothing policy would score. Sampling from 0 gives this task an 8-10 % no-op floor -- worse
+  #     than Reach's 1.05 % and Push's 6 %. Starting at success_tol makes it exactly 0.
+  #   - within success_tol of the joint limit the hard stop halts the drawer inside tolerance however
+  #     it was driven, so the goal rewards yanking rather than control.
+  #
+  # Tied to success_tol by interpolation rather than repeated, so overriding the tolerance cannot
+  # silently reopen the no-op floor.
+  target_opening_low: ${.success_tol}
+
+  # A FRACTION of the drawer's own joint range, which the wrapper reads off the compiled model. The
+  # scene is the single source of truth for the 0.12 m travel, so this stays correct if it changes.
+  # 0.85 leaves 0.018 m beyond the furthest goal.
+  target_opening_frac: 0.85
+
+  # §8.1 initial arm configuration. The ONLY randomness in the start state -- the drawer is closed
+  # and the cabinet is welded at a fixed pose in every episode.
+  joint_jitter: 0.05
+
+  # §9 rendering. Off during training; used by evaluation videos and the §10 render test.
+  render_mode: null
+  render_height: 480
+  render_width: 640
+
+  # §13 trajectory logging. Override per run so seeds do not mix:
+  #     env.wrapper.trajectory_log=<repo>/results/runs/drawer_seed1/trajectories
+  trajectory_log: null

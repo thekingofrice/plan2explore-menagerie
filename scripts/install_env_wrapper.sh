@@ -39,6 +39,18 @@ PUSH_ENV_DEST="${SHEEPRL_DIR}/sheeprl/envs/menagerie_panda_push.py"
 PUSH_CFG_DEST="${SHEEPRL_DIR}/sheeprl/configs/env/menagerie_panda_push.yaml"
 PUSH_XML_DEST="${MENAGERIE_DIR}/franka_emika_panda/panda_push.xml"
 
+# Drawer Open. Wrapper and config as above, but its MJCF is NOT on the load path: the wrapper loads
+# Menagerie's scene.xml unmodified and attaches the cabinet and drawer from Python via
+# render_scene.add_drawer_scene, so the include-resolution constraint above does not apply to it.
+#
+# The link is placed anyway, for two reasons: it makes the scene openable in MuJoCo's viewer, and
+# tests/test_drawer_open_environment.py::test_reference_xml_matches_add_drawer_scene skips without
+# it. That test is the whole mitigation for keeping the MJCF as a second description of the geometry
+# -- unlinked, the reference is free to drift from add_drawer_scene unnoticed.
+DRAWER_ENV_DEST="${SHEEPRL_DIR}/sheeprl/envs/menagerie_panda_drawer_open.py"
+DRAWER_CFG_DEST="${SHEEPRL_DIR}/sheeprl/configs/env/menagerie_panda_drawer_open.yaml"
+DRAWER_XML_DEST="${MENAGERIE_DIR}/franka_emika_panda/panda_drawer_open.xml"
+
 # ---------------------------------------------------------------------------
 # link_file <source> <destination>
 #
@@ -89,17 +101,27 @@ link_file "${SRC_DIR}/menagerie_panda_push.py" "${PUSH_ENV_DEST}"
 link_file "${SRC_DIR}/menagerie_panda_push.yaml" "${PUSH_CFG_DEST}"
 link_file "${TASKS_DIR}/panda_push.xml" "${PUSH_XML_DEST}"
 
-# The link above is the only thing this repository puts inside the pinned Menagerie clone. No
-# tracked file is touched, so check_pins()'s `git rev-parse HEAD` still matches -- but the link
-# would show as untracked and read like drift, so exclude it locally.
+link_file "${SRC_DIR}/menagerie_panda_drawer_open.py" "${DRAWER_ENV_DEST}"
+link_file "${SRC_DIR}/menagerie_panda_drawer_open.yaml" "${DRAWER_CFG_DEST}"
+link_file "${TASKS_DIR}/panda_drawer_open.xml" "${DRAWER_XML_DEST}"
+
+# The two links above are the only things this repository puts inside the pinned Menagerie clone. No
+# tracked file is touched, so check_pins()'s `git rev-parse HEAD` still matches -- but the links
+# would show as untracked and read like drift, so exclude them locally.
 MENAGERIE_EXCLUDE="${MENAGERIE_DIR}/.git/info/exclude"
+MENAGERIE_LINKS=(
+  "franka_emika_panda/panda_push.xml"
+  "franka_emika_panda/panda_drawer_open.xml"
+)
 if [[ -d "$(dirname "${MENAGERIE_EXCLUDE}")" ]]; then
-  if ! grep -qxF "franka_emika_panda/panda_push.xml" "${MENAGERIE_EXCLUDE}" 2>/dev/null; then
-    echo "franka_emika_panda/panda_push.xml" >>"${MENAGERIE_EXCLUDE}"
-    log "excluded franka_emika_panda/panda_push.xml from the Menagerie clone's git status"
-  fi
+  for rel in "${MENAGERIE_LINKS[@]}"; do
+    if ! grep -qxF "${rel}" "${MENAGERIE_EXCLUDE}" 2>/dev/null; then
+      echo "${rel}" >>"${MENAGERIE_EXCLUDE}"
+      log "excluded ${rel} from the Menagerie clone's git status"
+    fi
+  done
 else
-  warn "no ${MENAGERIE_EXCLUDE}; the panda_push.xml link will show as untracked in Menagerie"
+  warn "no ${MENAGERIE_EXCLUDE}; the task MJCF links will show as untracked in Menagerie"
 fi
 
 # Prove the import path Hydra's _target_ will use actually resolves.
@@ -108,7 +130,8 @@ if [[ -x "${VENV_DIR}/bin/python" ]]; then
   venv_python -c "
 from sheeprl.envs.menagerie_panda import MenageriePandaReach
 from sheeprl.envs.menagerie_panda_push import MenageriePandaPush
-for cls in (MenageriePandaReach, MenageriePandaPush):
+from sheeprl.envs.menagerie_panda_drawer_open import MenageriePandaDrawerOpen
+for cls in (MenageriePandaReach, MenageriePandaPush, MenageriePandaDrawerOpen):
     e = cls()
     print(f'  ok: {cls.__name__} obs {e.observation_space[\"state\"].shape}, '
           f'act {e.action_space.shape}, n_substeps {e.n_substeps}')

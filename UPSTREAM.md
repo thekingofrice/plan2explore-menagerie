@@ -250,3 +250,44 @@ not change the scientific algorithm.
 
 `scripts/verify_algorithm_untouched.sh` fails the run if this table is empty but the algorithm
 directories differ from the pinned SHA.
+
+## Shared-code changes made while Push (§15) was paused
+
+Drawer Open is being built while Panda Push is set aside. Both tasks share
+`menagerie_integration/render_scene.py`, so a change made for one can silently alter the other's
+compiled model — and ENVIRONMENT_SPEC.md's Push constants were frozen 2026-08-31 against measured
+distributions. Anything touching that shared file is logged here so Push can be resumed without
+re-deriving whether it still means what it meant.
+
+**Verdict so far: Push's compiled model is unchanged. No Push measurement is invalidated.**
+
+| Date | Change | Push impact |
+|---|---|---|
+| 2026-09-05 | `render_scene.load_model()` gains an `add_bodies=None` parameter, for tasks that build their scene in Python instead of from a task MJCF. The early-return guard widens from `base_height == 0.0 and not render` to also require `add_bodies is None`. | **None.** Push passes `base_height=self.table_top_z` (non-zero), so it already took the MjSpec branch and never reached that guard. Reach passes neither argument, so the guard evaluates exactly as before. `add_bodies(spec)` never runs for either. |
+| 2026-09-05 | `render_scene.add_drawer_scene()` added beside `add_push_scene()`. | **None.** New function; nothing in Push calls it. |
+| 2026-09-05 | `menagerie_tasks/panda_drawer_open.xml` kept as a readable reference *alongside* the Python builder, by decision. | **None directly.** It reproduces for Drawer the two-sources-of-truth risk the comment at `render_scene.py:117` already records for Push's `TABLE_*`/`CUBE_*` constants. |
+
+### Things that would affect Push, deliberately not done
+
+- **`DEFAULT_CAMERA_EYE` / `DEFAULT_CAMERA_LOOK_AT` are untouched.** Drawer Open reuses them as-is.
+  Its workspace (x 0.29–0.72, z 0.30–0.43) is not the same as Push's, so if Drawer ever needs a
+  different viewpoint it must pass `camera_eye=` / `camera_look_at=` per call. Editing the module
+  defaults would change Push's §13.1 evaluation videos without changing any Push file.
+- `menagerie_panda_push.py`, `menagerie_panda_push.yaml`, `menagerie_tasks/panda_push.xml`,
+  `add_push_scene()`, the `TABLE_*`/`CUBE_*`/`SCENE_FRICTION` constants and `measure_scene()` are
+  all unmodified. Drawer Open does not call `measure_scene` — it wants a table geom.
+- `install_env_wrapper.sh` now installs Drawer Open's three links alongside Push's. Push's own
+  `link_file` lines are unchanged, and the `.git/info/exclude` block was generalised from a
+  hard-coded `panda_push.xml` to a `MENAGERIE_LINKS` array containing both files — same behaviour for
+  Push, since `grep -qxF` still skips an entry already present. The import check now constructs
+  `MenageriePandaDrawerOpen` too, so a broken Drawer wrapper fails the install for all three tasks
+  rather than only at training time.
+
+### If Push is resumed via `add_bodies`
+
+Push can drop its symlink into the pinned clone by passing `add_bodies=add_push_scene` instead of
+loading `panda_push.xml`. That is a model-identity change, not a refactor: `add_bodies` runs before
+the base is raised and before render assets are attached, so task bodies land in `worldbody` directly
+after the robot — the same slot a task MJCF's own `<worldbody>` fills, which is what fixes the cube's
+`qposadr 9`. Verify with `scripts/probe_push_mjspec.py --diff` before trusting any prior Push
+checkpoint against the result.

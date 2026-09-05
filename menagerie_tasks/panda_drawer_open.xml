@@ -1,0 +1,65 @@
+<!--
+  panda_drawer_open.xml - the Drawer Open scene.
+
+  Not in References/SelfEx-WM_Notes.tex; a new task, not one of the notes' numbered phases.
+
+  REFERENCE ONLY -- this file is NOT what runs. menagerie_panda_drawer_open.py loads Menagerie's
+  scene.xml directly and attaches these bodies from Python via render_scene.add_drawer_scene, so
+  nothing is written into the pinned clone. This file exists to be read and to be opened in MuJoCo's
+  viewer; it must be kept in step with add_drawer_scene by hand, and add_drawer_scene wins.
+
+  Loading THIS file works only from a symlink placed BESIDE Menagerie's scene.xml, for the reason
+  panda_push.xml records: the include below is a bare sibling reference and only resolves from there.
+
+  No table, and the arm base is NOT raised - unlike Push, load_model(base_height=0.0) applies, so a
+  non-rendering load falls through to a plain from_xml_path. The cabinet is welded in mid-air at a
+  fixed (x, y, z); nothing supports it, which is legal because a body without a joint is welded to
+  the world at whatever height it is declared.
+
+  nu stays 8: the drawer's slide joint is unactuated, so Reach, Push and Drawer Open share an action
+  space. nq/nv/njnt become 10/10/10 - and nq == njnt again, unlike Push's free joint.
+
+  scene.xml's "home" keyframe carries 9 qpos; MuJoCo zero-pads the tenth, which is the closed drawer.
+-->
+<mujoco model="panda_drawer_open">
+  <include file="scene.xml"/>
+
+  <worldbody>
+    <!-- Static housing: top, back and two sides. No bottom and no front - the slide joint is what
+         holds the drawer up, so a shelf would only add contacts. Body origin is the centre of the
+         cavity, which spans x [0.52, 0.72], y [-0.11, 0.11], z [0.30, 0.42]. -->
+    <body name="cabinet" pos="0.62 0 0.36">
+      <geom name="cabinet_top" type="box" pos="0 0 0.065" size="0.10 0.12 0.005"
+            rgba="0.55 0.45 0.35 1" friction="1 0.005 0.0001"/>
+      <geom name="cabinet_back" type="box" pos="0.105 0 0" size="0.005 0.12 0.06"
+            rgba="0.55 0.45 0.35 1" friction="1 0.005 0.0001"/>
+      <geom name="cabinet_side_left" type="box" pos="0 0.115 0" size="0.10 0.005 0.06"
+            rgba="0.55 0.45 0.35 1" friction="1 0.005 0.0001"/>
+      <geom name="cabinet_side_right" type="box" pos="0 -0.115 0" size="0.10 0.005 0.06"
+            rgba="0.55 0.45 0.35 1" friction="1 0.005 0.0001"/>
+    </body>
+
+    <!-- The sliding part, declared at the closed pose. Axis is -x so qpos IS the opening distance in
+         metres: 0 closed, 0.12 fully out. The joint permits translation only, so the drawer can
+         never touch the cabinet panels - the clearance is cosmetic, not a collision margin.
+
+         0.5 kg explicitly: at MuJoCo's default density this slab would mass 3.6 kg, above the
+         Panda's rated payload. -->
+    <body name="drawer" pos="0.62 0 0.36">
+      <joint name="drawer_slide" type="slide" axis="-1 0 0" range="0 0.12"
+             damping="5" frictionloss="2"/>
+      <geom name="drawer_body" type="box" size="0.09 0.10 0.05" mass="0.5"
+            rgba="0.45 0.38 0.30 1" friction="1 0.005 0.0001"/>
+
+      <!-- Handle on a stem, on the face pointing at the robot. The 0.035 m gap between the drawer
+           face (local x = -0.09) and the handle's rear face (local x = -0.125) is the point: a
+           finger slots in beside the stem and pulling in -x catches on the cube, so opening does not
+           require a closed grasp. The cube is 3 cm, well inside the Panda's 8 cm finger opening, so
+           grasping it is still available. -->
+      <geom name="handle_stem" type="box" pos="-0.1075 0 0" size="0.0175 0.008 0.008"
+            rgba="0.30 0.30 0.32 1" friction="1 0.005 0.0001"/>
+      <geom name="handle" type="box" pos="-0.14 0 0" size="0.015 0.015 0.015"
+            rgba="0.85 0.2 0.2 1" friction="1 0.005 0.0001"/>
+    </body>
+  </worldbody>
+</mujoco>
